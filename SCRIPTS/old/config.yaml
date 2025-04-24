@@ -1,0 +1,17 @@
+code:             'ART'
+output_dir:       './output'
+dir_snapshots:    '/media/temp1/AGORA/ART/Cosmo_v18/'
+snapequiv_path:   '~/trees/snap_equiv.dat'
+candidates:       '~/ARRAKIHSv3_Infall_Cosmov18.csv'
+RCT_paths:
+    main:         '~/trees/MainTree.csv'
+    sat1:         '~/trees/SatelliteTrees.csv'
+constraints:
+    mlow:         1E8
+    mhigh:        inf
+    zlow:         -0.1
+    zhigh:        4
+    stellar_low:  4E5
+    stellar_high: inf
+Rvir:             [1,2,3,4]
+comparison_plot:  True

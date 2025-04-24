@@ -1,0 +1,13 @@
+# Ignore everything in repository root 
+/*
+
+# Files to not ignore
+!/.gitignore
+!/interpolate_orbits.py
+!/find_orbits.py
+!/AGORAComparison.py
+!/AGORAComparison.yaml
+
+# Folder to not ignore
+!/galexquared
+!/SCRIPTS
