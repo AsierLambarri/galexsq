@@ -1,0 +1,14 @@
+output: "./AGORAComp_plots"
+files_in_one: False
+dwarfs:
+    files:
+        - "./output_ART/ART_Satellites.csv"
+        - "./output_GEAR/GEAR_Satellites.csv"
+    subtrees:
+        - [14642, 7788, 236, 56181]
+        - [1059, 1473, 1209, 1071]
+    alias:
+        - "ART"
+        - "GEAR"
+literature: "../DwarfProperties/data/"
+plot: "all"

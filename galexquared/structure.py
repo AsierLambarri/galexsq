@@ -10,6 +10,7 @@ from scipy.stats import binned_statistic
 from .class_methods import half_mass_radius, refine_6Dcenter, easy_los_velocity, gram_schmidt, vectorized_base_change
 from .class_methods import density_profile as densprof
 from .class_methods import velocity_profile as velprof
+from .class_methods import softmax
 
 def _collapse_to_longest_true(arr):
     """

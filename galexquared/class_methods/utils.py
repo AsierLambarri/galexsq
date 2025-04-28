@@ -90,7 +90,7 @@ def vectorized_base_change(matrix, vector_quantity):
     try:
         return new_basis_vectors * vector_quantity.units
     except:
-        return new_basis_vector
+        return new_basis_vectors
     
 def easy_los_velocity(vel, los):
     """Computes the Line of Sight Velocity of particles along a given LOS. In principle this could be done by changing basis using

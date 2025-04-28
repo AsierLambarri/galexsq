@@ -11,3 +11,10 @@
 # Folder to not ignore
 !/galexquared
 !/SCRIPTS
+
+# Ignore python cache
+**/__pycache__/
+**/.ipynb_checkpoints/
+**/*.pyc
+**/*.pyo
+**/*.log

@@ -11,11 +11,11 @@ from pathlib import Path
 from scipy.optimize import root_scalar
 from scipy.stats import binned_statistic
 
-from pytreegrav import Potential, PotentialTarget
+from pytreegrav import Potential, PotentialTarget, ConstructTree
 
 from .config import config
 from .mergertree import MergerTree
-from .class_methods import load_ftable, softmax, half_mass_radius
+from .class_methods import load_ftable, softmax, half_mass_radius, refine_6Dcenter
 
 
 
@@ -25,24 +25,25 @@ class HaloParticles:
     """
     def __init__(self,
                  subtree,
-                 sp,
-                 status
+                 data_source,
+                 particle_names
                 ):
         """Init function.
         """
         self.subtree = subtree
-        self.status = status
-        self.subtree_all = "nbody"
-        self.subtree_dm = "darkmatter"
-        self.subtree_stars = "stars"
+        self.nbody = particle_names["nbody"]
+        self.dm = particle_names["darkmatter"]
+        self.stars = particle_names["stars"]
+        self._octree =None
 
-        self.sp = sp
-        self.ds = self.sp.ds
+        self.data = data_source
+        self.ds = self.data.ds
         self.quan = self.ds.quan
         self.arr = self.ds.arr
-        self.cosmology = self.ds.cosmology
+        self.cosmo = self.ds.cosmology
+        self.redshift = self.ds.current_redshift
         self.crit_dens = self.critical_density()
-        self.over_dens = self.overdensity()
+        self.virial_overdens = self.overdensity()
 
         self.b_a = {}
         self.c_a = {}
@@ -53,39 +54,80 @@ class HaloParticles:
         self.cm = {}
         self.vcm = {}
         
+        
+    @property
+    def octree(self):
+        if self._octree is None:
+            self._octree = ConstructTree(
+                self.data[self.nbody, "particle_position"].to("kpc"),
+                m=self.data[self.nbody, "particle_mass"].to("Msun"),
+                softening=None,
+                quadrupole=True,
+
+            )
+        return self._octree
+            
 
     def _cm_nmostbound(self, N=32, f=0.1):
         """Returns the CoM computed with the N=min(32, f * Ntot) most bound particles
         """
-        Npart = int(np.rint(np.minimum(f * self.sp[self.subtree_dm, "index"].shape[0], N)))
-        most_bound_ids = np.argsort(self.sp[self.subtree_dm, "total_energy"])[:Npart]
+        Npart = int(np.rint(np.minimum(f * self.data[self.dm, "index"].shape[0], N)))
+        most_bound_ids = np.argsort(self.data[self.dm, "total_energy"])[:Npart]
         
-        mask = np.zeros(len(self.sp[self.subtree_dm, "index"]), dtype=bool)
+        mask = np.zeros(len(self.data[self.dm, "index"]), dtype=bool)
         mask[most_bound_ids] = True
         
         self.neff = Npart
 
-        tmp_cm = np.average(self.sp[self.subtree_dm, "coordinates"][mask], axis=0, weights=self.sp[self.subtree_dm, "mass"][mask])
-        tmp_vcm = np.average(self.sp[self.subtree_dm, "velocity"][mask], axis=0, weights=self.sp[self.subtree_dm, "mass"][mask]) 
+        tmp_cm = np.average(self.data[self.dm, "coordinates"][mask], axis=0, weights=self.data[self.dm, "mass"][mask])
+        tmp_vcm = np.average(self.data[self.dm, "velocity"][mask], axis=0, weights=self.data[self.dm, "mass"][mask]) 
         return tmp_cm, tmp_vcm
-    
     
     def _cm_softmax(self, T="adaptative"):
         """Returns the CoM computed via softmax with wheights being:
                             w ~ e^-E/T 
         and T = | mean(kin) / min(E)| ~ 0.2
         """        
-        w = self.sp[self.subtree_dm,"total_energy"]/self.sp[self.subtree_dm,"total_energy"].min()
+        w = self.data[self.dm,"total_energy"]/self.data[self.dm,"total_energy"].min()
         if T == "adaptative":
-            T = np.abs(self.sp[self.subtree_dm, "kinetic_energy"].mean()/self.sp[self.subtree_dm,"total_energy"].min())
+            T = np.abs(self.data[self.dm, "kinetic_energy"].mean()/self.data[self.dm,"total_energy"].min())
             
         self.neff = 1 / np.sum(softmax(w, T)**2)
         self.T = T
-        tmp_cm = np.average(self.sp[self.subtree_dm, "coordinates"], axis=0, weights=softmax(w, T))
-        tmp_vcm = np.average(self.sp[self.subtree_dm, "velocity"], axis=0, weights=softmax(w, T))
+        tmp_cm = np.average(self.data[self.dm, "coordinates"], axis=0, weights=softmax(w, T))
+        tmp_vcm = np.average(self.data[self.dm, "velocity"], axis=0, weights=softmax(w, T))
+        return tmp_cm, tmp_vcm
+    
+    def _cm_deepest_potential(self, N=32, f=0.1):
+        """Computes the center as the average position of the deepest particles in the potential
+        """
+        Npart = int(np.rint(np.minimum(f * self.data[self.dm, "index"].shape[0], N)))
+        most_bound_ids = np.argsort(self.data[self.dm, "grav_potential"])[:Npart]
+        
+        mask = np.zeros(len(self.data[self.dm, "index"]), dtype=bool)
+        mask[most_bound_ids] = True
+        
+        self.neff = Npart
+
+        tmp_cm = np.average(self.data[self.dm, "coordinates"][mask], axis=0, weights=self.data[self.dm, "mass"][mask])
+        tmp_vcm = np.average(self.data[self.dm, "velocity"][mask], axis=0, weights=self.data[self.dm, "mass"][mask]) 
         return tmp_cm, tmp_vcm
 
-        
+    def _cm_no_potential(self, method, **kwargs):
+        """Computes an approximate center without using potential energy information
+        """
+        self._cen_result = refine_6Dcenter(
+            self.data[self.dm, "particle_position"].to("kpc"),
+            self.data[self.dm, "particle_mass"].to("Msun"),
+            self.data[self.dm, "particle_velocity"].to("km/s"),
+            method=method,
+            **kwargs
+        )
+        return self._cen_result["center"], self._cen_result["velocity"]
+
+
+
+
     def cm_nmostbound(self, N=32, f=0.1):
         """Returns the CoM computed with the N=min(32, f * Ntot) most bound particles
         """
@@ -94,7 +136,6 @@ class HaloParticles:
         self.cm["darkmatter"] = tmp_cm
         self.vcm["darkmatter"] = tmp_vcm
         return tmp_cm, tmp_vcm
-    
     
     def cm_softmax(self, T="adaptative"):
         """Returns the CoM computed via softmax with wheights being:
@@ -106,84 +147,113 @@ class HaloParticles:
         self.cm["darkmatter"] = tmp_cm
         self.vcm["darkmatter"] = tmp_vcm
         return tmp_cm, tmp_vcm
-
+    
+    def cm_deepest(self, N=32, f=0.1):
+        """Returns the CoM computed with the N=min(32, f * Ntot) most deepest potential particles
+        """
+        tmp_cm, tmp_vcm = self._cm_deepest_potential(N=N, f=f)
+        
+        self.cm["darkmatter"] = tmp_cm
+        self.vcm["darkmatter"] = tmp_vcm
+        return tmp_cm, tmp_vcm
+    
+    def cm_nopotential(self, method="adaptative", **kwargs):
+        """Returns the CoM computed with the N=min(32, f * Ntot) most deepest potential particles
+        """
+        tmp_cm, tmp_vcm = self._cm_no_potential(method=method, **kwargs)
+        
+        self.cm["darkmatter"] = tmp_cm
+        self.vcm["darkmatter"] = tmp_vcm
+        return tmp_cm, tmp_vcm
 
     def rockstar_velocity(self):
         """Computes velocity like a rockstar.
         """
-        if self.status == "outside":
-            center = self.sp.center
+        # if self.status == "outside":
+        #     center = self.data.center
             
-        elif self.status == "inside":
-            #center = self.sp.quantities.center_of_mass(use_gas = False, use_particles=True, particle_type=self.subtree_dm)
-            center = self.cm["darkmatter"]
-            
+        # elif self.status == "inside":
+        #     center = self.data.quantities.center_of_mass(use_gas = False, use_particles=True, particle_type=self.dm)
+        #     center = self.cm["darkmatter"]
+        
+        assert "darkmatter" in self.cm, "You first need to compute the center of mass of the halo!"
+        center = self.cm["darkmatter"]
         sp2 = self.ds.sphere(center, self.rvir * 0.1)
-        tmp_vcm = sp2.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.subtree_all).to("km/s")
+        tmp_vcm = sp2.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.nbody).to("km/s")
         self.vcm["darkmatter"] = tmp_vcm
         return tmp_vcm
+
+
+
+
+
 
 
     def change_sphere(self, center=None, radius=None):
         """Changes the sphere data source to a new one with center and radius
         specified as arguments
         """
-        self.sp = self.ds.sphere(
-            center if center is not None else self.sp.center, 
-            radius if radius is not None else self.sp.radius
+        self.data = self.ds.sphere(
+            center if center is not None else self.data.center, 
+            radius if radius is not None else self.data.radius
         )
+
+
+
+
 
 
     def overdensity(self):
         """Computes the virial collapse overdensity.
-        """
-        z = self.ds.current_redshift
-        
-        E = self.cosmology.hubble_parameter(z).to("km/s * 1/Mpc") / self.cosmology.hubble_constant
-        omega_z = (1 + z)**3 * self.cosmology.omega_matter / E**2 
+        """        
+        E = self.cosmo.hubble_parameter(self.redshift).to("km/s * 1/Mpc") / self.cosmo.hubble_constant
+        omega_z = (1 + self.redshift)**3 * self.cosmo.omega_matter / E**2 
         x = omega_z - 1
 
-        if self.cosmology.omega_radiation == 0:
+        if self.cosmo.omega_radiation == 0:
             overdensity = 18 * np.pi**2 + 82 * x - 39 * x**2
-        elif self.cosmology.omega_lambda == 0:
+        elif self.cosmo.omega_lambda == 0:
             overdensity = 18 * np.pi**2 + 60 * x - 32 * x**2
         return overdensity
 
-    
     def critical_density(self):
         """Computes the critical density.
         """
-        crit_dens = self.cosmology.critical_density(self.ds.current_redshift)
+        crit_dens = self.cosmo.critical_density(self.redshift)
         return crit_dens.to("Msun/kpc**3")
 
-
-    def virial_radius(self):
-        """Computes the virial radius of a halo as.  
+    def mean_density(self):
+        """Computes the critical density.
         """
-        overdens_crit_ratio = lambda masses, radius: masses.to("Msun").sum() / (4/3 * np.pi * (radius)**3) / self.crit_dens / self.over_dens
+        E = self.cosmo.hubble_parameter(self.redshift).to("km/s * 1/Mpc") / self.cosmo.hubble_constant
+        omega_z = (1 + self.redshift)**3 * self.cosmo.omega_matter / E**2 
+        mean_dens = self.cosmo.critical_density(self.redshift) * omega_z
+        return mean_dens.to("Msun/kpc**3")
+
+    def overdensity_radius(self, mode="crit", overdensity="virial"):
+        """Computes the virial radius of a halo as.  
+        """  
+        from time import time
+
+        overdens_crit_ratio = lambda masses, radius: masses.to("Msun").sum() / (4/3 * np.pi * (radius)**3) / self.crit_dens / self.virial_overdens
         
-        if self.status == "outside":
-            center = self.sp.center
-            
-        elif self.status == "inside":
-            #center = self.sp.quantities.center_of_mass(use_gas = False, use_particles=True, particle_type=self.subtree_dm)
-            center = self.cm["darkmatter"]
+        assert "darkmatter" in self.cm, "You first need to compute the center of mass of the halo!"
+        center = self.cm["darkmatter"]
             
             
-        rmax = np.linalg.norm(self.sp[self.subtree_all, "coordinates"] - center, axis=1).max().to("kpc")
+        rmax = np.linalg.norm(self.data[self.nbody, "particle_position"].to(center.units) - center, axis=1).max().to("kpc")
         trial_radii = rmax * 1.2 ** np.array([0, 0.1, 0.2,1, 2, 3, 4, 5, 6, 7, 8])
         
         for i, radius in enumerate(trial_radii):
             sp_aux = self.ds.sphere(center, radius)
-            masses = sp_aux[self.subtree_all, "mass"]
-            radii = np.linalg.norm(sp_aux[self.subtree_all, "coordinates"] - sp_aux.center, axis=1)
+            masses = sp_aux[self.nbody, "particle_mass"].to("Msun")
+            radii = np.linalg.norm(sp_aux[self.nbody, "particle_position"].to(center.units) - sp_aux.center, axis=1)
             dens_ratio = overdens_crit_ratio(masses[radii <= radius], radius)
             if dens_ratio < 1: 
                 max_radius = radius
                 self.rvir_iter = i
                 break
              
-        from time import time
         st = time()
         virialradius_zero = root_scalar(
             lambda radius: overdens_crit_ratio(masses[radii <= radius], radius * max_radius.units) - 1, 
@@ -194,34 +264,41 @@ class HaloParticles:
         print(ft - st)
         
         self.rvir = self.quan(virialradius_zero.root, max_radius.units).to("kpc")
-        if self.status == "outside":
-            self.sp = self.ds.sphere(center, self.rvir)
-        else:
-            pass
+        #if self.status == "outside":
+        #    self.data = self.ds.sphere(center, self.rvir)
+        #else:
+        #    pass
         return self.rvir
 
 
-    def half_mass_radius(self, X=0.5):
+
+
+
+
+
+
+
+
+    def X_mass_radius(self, X=0.5):
         """Computes the half mass radius
         """
         self.rhalf = half_mass_radius(
-            self.sp[self.subtree_all, "coordinates"].to("kpc"), 
-            self.sp[self.subtree_all, "mass"].to("Msun"), 
+            self.data[self.nbody, "coordinates"].to("kpc"), 
+            self.data[self.nbody, "mass"].to("Msun"), 
             self.cm["darkmatter"], 
             X, 
             project=False
         )
         return self.rhalf
 
-
     def vmax_rmax(self, soft, nbins):
         """Computes the maximum circular velocity and its radius.
         """
         nbins = min(nbins, 1000)
-        radii = np.linalg.norm(self.sp[self.subtree_dm, "coordinates"] - self.cm["darkmatter"], axis=1).to("kpc")
+        radii = np.linalg.norm(self.data[self.dm, "coordinates"] - self.cm["darkmatter"], axis=1).to("kpc")
         bin_masses, bin_edges, bin_num = binned_statistic(
             radii,
-            self.sp[self.subtree_dm, "mass"].to("Msun"),
+            self.data[self.dm, "mass"].to("Msun"),
             statistic="sum",
             range=[2*soft.to("kpc").value, radii.max().to("kpc").value],
             bins=nbins
@@ -259,12 +336,12 @@ class HaloParticles:
         """Computes the inertia tensor of a set of particles.
         """    
         if pt == "stars":
-            sp_pt = self.subtree_stars
+            sp_pt = self.stars
         elif pt == "darkmatter":
-            sp_pt = self.subtree_dm
+            sp_pt = self.dm
             
-        positions = self.sp[sp_pt, "coordinates"].to("kpc") - self.cm[pt]
-        masses = self.sp[sp_pt, "mass"].to("Msun")
+        positions = self.data[sp_pt, "coordinates"].to("kpc") - self.cm[pt]
+        masses = self.data[sp_pt, "mass"].to("Msun")
         if positions.shape[1] != 3:
             raise ValueError("Positions must have shape (N, 3)")
 
@@ -288,11 +365,11 @@ class HaloParticles:
         """Computes the mass distribution tensor for a set of particles.
         """
         if pt == "stars":
-            sp_pt = self.subtree_stars
+            sp_pt = self.stars
         elif pt == "darkmatter":
-            sp_pt = self.subtree_dm
+            sp_pt = self.dm
             
-        positions = self.sp[sp_pt, "coordinates"].to("kpc") - self.cm[pt]
+        positions = self.data[sp_pt, "coordinates"].to("kpc") - self.cm[pt]
         if positions.shape[1] != 3:
             raise ValueError("Positions must have shape (N, 3)")
         
@@ -349,6 +426,10 @@ class HaloParticles:
         return b_over_a, c_over_a, largest_axis_vector
 
 
+    def clear_data(self):
+        self.data.clear_data()
+
+
 
 
 
@@ -361,9 +442,10 @@ class HaloParticlesOutside(HaloParticles):
     """
     def __init__(self,
                  subtree,
-                 sp
+                 sp,
+                 particle_names
                  ):
-        super().__init__(subtree, sp, "outside")
+        super().__init__(subtree, sp, particle_names, "outside")
         
        
     def _add_energy_filter(self, beta):
@@ -391,25 +473,27 @@ class HaloParticlesOutside(HaloParticles):
         )
         self.ds.add_particle_filter(f"nbody_{self.subtree}")
         
-        self.subtree_all = f"nbody_{self.subtree}"
-        self.subtree_stars = f"stars_{self.subtree}"
-        self.subtree_dm = f"darkmatter_{self.subtree}"
+        self.nbody = self.nbody + f"_{self.subtree}" #f"nbody_{self.subtree}"
+        self.stars = self.stars + f"_{self.subtree}" #f"stars_{self.subtree}"
+        self.dm = self.dm + f"_{self.subtree}"    #f"darkmatter_{self.subtree}"
         
         
     def compute_potential(self):
         """Computes potential of all particles.
         """
         def _pot(field, data, obj=self):
-            n = data["nbody", "mass"].shape[0]
+            n = data["nbody", "particle_mass"].shape[0]
+            octree = obj.octree
             return obj.arr( 
                 Potential(
                     pos=data["nbody", "coordinates"].to("kpc"), 
-                    m=data["nbody", "mass"].to("Msun"), 
-                    softening=data["nbody", "softening"].to("kpc"),
+                    m=data["nbody", "particle_mass"].to("Msun"), 
+                    softening=None, #data["nbody", "softening"].to("kpc"),
                     G=4.300917270038E-6, 
                     theta=min( 0.6, 0.3 * (n / 1E3) ** 0.08 ),
-                    parallel=True,
-                    quadrupole=True
+                    parallel=False,
+                    quadrupole=False,
+                    tree=octree
                 ), 
                 'km**2/s**2'
             )
@@ -423,7 +507,7 @@ class HaloParticlesOutside(HaloParticles):
         )
         self.ds.add_field(
             name=("nbody", "grav_energy"),
-            function=lambda field, data: data["nbody", "grav_potential"] * data["nbody", "mass"],
+            function=lambda field, data: data["nbody", "grav_potential"] * data["nbody", "particle_mass"],
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
@@ -435,12 +519,11 @@ class HaloParticlesOutside(HaloParticles):
         if vcm is not None:
             bulk_vel = vcm
         else:
-            bulk_vel = self.sp.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type="darkmatter").to("km/s")
+            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type="darkmatter").to("km/s")
 
-        print
         self.ds.add_field(
             name=("nbody", "kinetic_energy"),
-            function=lambda field, data: 0.5 * data["nbody", "mass"] * np.linalg.norm(data["nbody", "velocity"] - bulk_vel, axis=1) ** 2,
+            function=lambda field, data: 0.5 * data["nbody", "particle_mass"] * np.linalg.norm(data["nbody", "velocity"] - bulk_vel, axis=1) ** 2,
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
@@ -450,7 +533,7 @@ class HaloParticlesOutside(HaloParticles):
         """Computes potential, kinetic and total energy all at once.
         Boundness is determined using bulk velocity (see ROCKSTAR).
         """
-        self.sp.clear_data()
+        self.data.clear_data()
         self.compute_kinetic(vcm=vcm)
         self.compute_potential()
         self.ds.add_field(
@@ -483,14 +566,13 @@ class HaloParticlesInside(HaloParticles):
     def __init__(self,
                  subtree,
                  sp,
+                 particle_names,
                  stars_index,
                  stars_bound_index,
                  dm_index,
                  dm_bound_index
-                 #previous_index,
-                 #previous_bound_index
                  ):
-        super().__init__(subtree, sp, "inside")
+        super().__init__(subtree, sp, particle_names, "inside")
         
         self.prev_boundbody = f"prev_nbody_{subtree}"
         #self.prev_index = previous_index
@@ -507,11 +589,11 @@ class HaloParticlesInside(HaloParticles):
             "nbody" : np.concatenate((stars_bound_index, dm_bound_index))
         }
         
-        self.subtree_all = "nbody_static"
-        self.subtree_dm = "darkmatter_static"
-        self.subtree_stars = "stars_static"
+        self.nbody = "nbody_static"
+        self.dm = "darkmatter_static"
+        self.stars = "stars_static"
 
-        self.sp.clear_data()
+        self.data.clear_data()
         
     
     def _initial_particle_filter(self):
@@ -576,9 +658,9 @@ class HaloParticlesInside(HaloParticles):
         )
         self.ds.add_particle_filter(f"nbody_{self.subtree}")
         
-        self.subtree_all = f"nbody_{self.subtree}"
-        self.subtree_stars = f"stars_{self.subtree}"
-        self.subtree_dm = f"darkmatter_{self.subtree}"
+        self.nbody = f"nbody_{self.subtree}"
+        self.stars = f"stars_{self.subtree}"
+        self.dm = f"darkmatter_{self.subtree}"
         
         
     def compute_potential(self):
@@ -620,7 +702,7 @@ class HaloParticlesInside(HaloParticles):
         if vcm is not None:
             bulk_vel = vcm
         else:
-            bulk_vel = self.sp.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.subtree_dm).to("km/s")
+            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.dm).to("km/s")
 
         self.ds.add_field(
             name=("nbody_static", "kinetic_energy"),
@@ -635,7 +717,7 @@ class HaloParticlesInside(HaloParticles):
         """Computes potential, kinetic and total energy all at once.
         Boundness is determined using bulk velocity (see ROCKSTAR).
         """
-        self.sp.clear_data()
+        self.data.clear_data()
         self.compute_kinetic(vcm=vcm)
         self.compute_potential()
         self.ds.add_field(
