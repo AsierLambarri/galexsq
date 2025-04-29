@@ -505,7 +505,32 @@ class HaloParticlesOutside(HaloParticles):
                  ):
         super().__init__(subtree, sp, particle_names)
         
-       
+        self.cm["darkmatter"] = sp.center.to("kpc")
+        self._recenter_data()
+
+    def _recenter_data(self):
+        """Recenters data and creates a minimal sphere where <rho>/rho_crit < 0.9 * delta
+        """
+        overdens_crit_ratio = lambda masses, radius: masses.to("Msun").sum() / (4/3 * np.pi * (radius)**3) / self.crit_dens / self.virial_overdens
+
+        center = self.cm["darkmatter"]
+        
+        rmax = np.linalg.norm(self.data[self.nbody, "particle_position"].to(center.units) - center, axis=1).max().to("kpc")
+        trial_radii = rmax * 1.2 ** np.array([0, 0.1, 0.2, 1, 2, 3, 4, 5, 6, 7, 8])
+        
+        for i, radius in enumerate(trial_radii):
+            sp_aux = self.ds.sphere(center, radius)
+            masses = sp_aux[self.nbody, "particle_mass"].to("Msun")
+            radii = np.linalg.norm(sp_aux[self.nbody, "particle_position"].to(center.units) - sp_aux.center, axis=1)
+            dens_ratio = overdens_crit_ratio(masses[radii <= radius], radius)
+            if dens_ratio < 0.9: 
+                max_radius = radius
+                self.rvir_iter = i
+                break
+
+        self.data = sp_aux
+        self.cm = {}
+        
         
     def _add_dmstars_fields(self):
         """Extends particle fields to individual stars and dark-matter
@@ -605,7 +630,7 @@ class HaloParticlesOutside(HaloParticles):
         if vcm is not None:
             bulk_vel = vcm
         else:
-            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.dm).to("km/s")
+            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.bound_dm).to("km/s")
 
         self.ds.add_field(
             name=(self.nbody, "kinetic_energy"),

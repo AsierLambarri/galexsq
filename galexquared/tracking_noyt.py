@@ -18,8 +18,7 @@ from .mergertree import MergerTree
 from .class_methods import load_ftable, softmax, half_mass_radius, refine_6Dcenter
 
 
-from dataclasses import dataclass
-
+import gc
 
 class ParticleData:
     """Simple class to handle particle data, with an option to provide a mask
@@ -80,7 +79,7 @@ class ParticleData:
         
         
         
-    def add_bound_mask(self, bound_indices):
+    def add_bound_mask(self, bound_indices, suffix="_bound"):
         """Adds fields for boundness
         """
         particles = [self.nbody, self.dm, self.stars]
@@ -89,8 +88,27 @@ class ParticleData:
             mask = np.isin(self._data[ptype, "particle_index"], bound_indices)
             self._masks[ptype] = mask
             for field in all_fields:
-                self._data[ptype + "_bound", field] = self._data[ptype, field][mask]
+                self._data[ptype + suffix, field] = self._data[ptype, field][mask]
 
+    
+    def rename_particle(self, ptype, new_name):
+        """Renames particle
+        """
+        all_fields = self._get_keys(ptype)
+        for field in all_fields:
+            self._data[new_name, field] = self._data.pop(ptype, field)
+
+        gc.collect()
+
+
+    def remove_particle(self, ptype):
+        """Removes particle from data
+        """
+        all_fields = self._get_keys(ptype)
+        for field in all_fields:
+            self._data.pop(ptype, field)
+
+        gc.collect()
 
 
 
@@ -255,7 +273,7 @@ class HaloParticles:
         assert "darkmatter" in self.cm, "You first need to compute the center of mass of the halo!"
         center = self.cm["darkmatter"]
         sp2 = self.ds.sphere(center, self.rvir * 0.1)
-        tmp_vcm = sp2.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.bound_nbody).to("km/s")
+        tmp_vcm = sp2.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.dm).to("km/s")
         self.vcm["darkmatter"] = tmp_vcm
         return tmp_vcm
 
@@ -271,7 +289,9 @@ class HaloParticles:
         """
         self.data = ParticleData(new_data, self._particle_names)
         self._octree = None
-
+        self.bound_dm = self.dm
+        self.bound_nbody = self.nbody
+        self.bound_stars = self.stars
 
 
 
@@ -480,8 +500,6 @@ class HaloParticles:
         return b_over_a, c_over_a, largest_axis_vector
 
 
-    def clear_data(self):
-        self.data.clear_data()
 
 
 
@@ -525,6 +543,167 @@ class HaloParticlesOutside(HaloParticles):
 
         self.update_data(sp_aux)
         self.cm = {}
+        
+    def compute_potential(self):
+        """Computes potential of all particles.
+        """
+        n = self.data[self.nbody, "particle_index"].shape[0]
+        nbody_grav_potential = self.arr( Potential(
+                pos=self.data[self.nbody, "particle_position"].to("kpc"), 
+                m=self.data[self.nbody, "particle_mass"].to("Msun"), 
+                softening=None, 
+                G=4.300917270038E-6, 
+                theta=min( 0.6, 0.3 * (n / 1E3) ** 0.08 ),
+                parallel=False,
+                quadrupole=False,
+                tree=self.octree
+            ), 
+            'km**2/s**2'
+        )
+        nbody_grav_energy = (self.data[self.nbody, "particle_mass"] * nbody_grav_potential).to("Msun * km**2/s**2")
+        self.data.add_field(
+            (self.nbody, "grav_potential"),
+            nbody_grav_potential,
+            self.data[self.nbody, "particle_index"]
+        )
+        self.data.add_field(
+            (self.nbody, "grav_energy"),
+            nbody_grav_energy,
+            self.data[self.nbody, "particle_index"]
+        )
+
+        st_mask = np.isin( self.data[self.nbody, "particle_index"],  self.data[self.stars, "particle_index"])
+        self.data.add_field(
+            (self.stars, "grav_potential"),
+            nbody_grav_potential[st_mask],
+            self.data[self.stars, "particle_index"]
+        )
+        self.data.add_field(
+            (self.stars, "grav_energy"),
+            nbody_grav_energy[st_mask],
+            self.data[self.stars, "particle_index"]
+        )
+
+        dm_mask = np.isin( self.data[self.nbody, "particle_index"],  self.data[self.dm, "particle_index"])
+        self.data.add_field(
+            (self.dm, "grav_potential"),
+            nbody_grav_potential[dm_mask],
+            self.data[self.dm, "particle_index"]
+        )
+        self.data.add_field(
+            (self.dm, "grav_energy"),
+            nbody_grav_energy[dm_mask],
+            self.data[self.dm, "particle_index"]
+        )
+        
+        
+    def compute_kinetic(self, vcm=None):
+        """Computes kinetic energy of all particles.
+        """
+        if vcm is not None:
+            bulk_vel = vcm
+        else:
+            bulk_vel = np.average(self.data[self.bound_dm, "particle_velocity"], axis=0, weights=self.data[self.bound_dm, "particle_mass"])
+
+        nbody_kin_energy =  0.5 * self.data[self.nbody, "particle_mass"] * np.linalg.norm(self.data[self.nbody, "particle_velocity"] - bulk_vel, axis=1) ** 2
+        self.data.add_field(
+            (self.nbody, "kinetic_energy"),
+            nbody_kin_energy.to("Msun * km**2/s**2"),
+            self.data[self.nbody, "particle_index"]
+        )
+
+        st_mask = np.isin( self.data[self.nbody, "particle_index"],  self.data[self.stars, "particle_index"])
+        self.data.add_field(
+            (self.stars, "kinetic_energy"),
+            nbody_kin_energy[st_mask].to("Msun * km**2/s**2"),
+            self.data[self.stars, "particle_index"]
+        )
+        dm_mask = np.isin( self.data[self.nbody, "particle_index"],  self.data[self.dm, "particle_index"])
+        self.data.add_field(
+            (self.dm, "kinetic_energy"),
+            nbody_kin_energy[dm_mask].to("Msun * km**2/s**2"),
+            self.data[self.dm, "particle_index"]
+        )
+
+        
+    def compute_energy(self, vcm=None, beta=0.95):
+        """Computes potential, kinetic and total energy all at once.
+        Boundness is determined using bulk velocity (see ROCKSTAR).
+        """
+        #self.data.clear_data()
+        self.compute_kinetic(vcm=vcm)
+        self.compute_potential()
+        
+        self.data.add_field(
+            (self.nbody, "total_energy"),
+            self.data[self.nbody, "grav_energy"] + self.data[self.nbody, "kinetic_energy"],
+            self.data[self.nbody, "particle_index"]
+        )
+        self.data.add_field(
+            (self.nbody, "total_energy"),
+            self.data[self.stars, "grav_energy"] + self.data[self.stars, "kinetic_energy"],
+            self.data[self.stars, "particle_index"]
+        )
+        self.data.add_field(
+            (self.dm, "total_energy"),
+            self.data[self.dm, "grav_energy"] + self.data[self.dm, "kinetic_energy"],
+            self.data[self.dm, "particle_index"]
+        )
+        mask = self.data[self.nbody, "grav_energy"] + beta * self.data[self.nbody, "kinetic_energy"] < 0
+        bound_indices = self.data[self.nbody, "particle_index"][mask]
+        self.data.add_bound_mask(bound_indices)
+
+        self.bound_nbody = self.nbody + f"_bound"
+        self.bound_stars = self.stars + f"_bound"
+        self.bound_dm = self.dm + f"_bound"
+
+
+        
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+class HaloParticlesInside(HaloParticles):
+    """Class to handle tracking of halo (track with dm + keep stars around) when inside of host virial radius
+    (host != main galaxy).
+    """
+    def __init__(self,
+                 subtree,
+                 sp,
+                 particle_names,
+                 previous_particle_info
+                 ):
+        super().__init__(subtree, sp, particle_names)
+        
+        self._ppi = previous_particle_info
+        
+    
+    def _prepare_particle_sets(self):
+        """Modifies the data atribute to include *_prev filter for previously bound particles
+        """
+        self.data.add_bound_mask(self._ppi["all"], suffix="_all")
+        self.data.add_bound_mask(self._ppi["bound"], suffix="_previous")
+        
+        self.data.remove_particle(self.nbody)
+        self.data.remove_particle(self.stars)
+        self.data.remove_particle(self.darkmatter)
+
+        self.data.rename_particle(self.nbody + "_all", self.nbody)
+        self.data.rename_particle(self.stars + "_all", self.stars)
+        self.data.rename_particle(self.darkmatter + "_all", self.darkmatter)
+
+        
+        
         
     def compute_potential(self):
         """Computes potential of all particles.
@@ -641,190 +820,6 @@ class HaloParticlesOutside(HaloParticles):
 
 
         
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
-class HaloParticlesInside(HaloParticles):
-    """Class to handle tracking of halo (track with dm + keep stars around) when inside of host virial radius
-    (host != main galaxy).
-    """
-    def __init__(self,
-                 subtree,
-                 sp,
-                 particle_names,
-                 stars_index,
-                 stars_bound_index,
-                 dm_index,
-                 dm_bound_index
-                 ):
-        super().__init__(subtree, sp, particle_names, "inside")
-        
-        self.prev_boundbody = f"prev_nbody_{subtree}"
-        #self.prev_index = previous_index
-        #self.prev_boundindex = previous_bound_index
-
-        self.prev_index = {
-            "stars" : stars_index,
-            "darkmatter" : dm_index,
-            "nbody" : np.concatenate((stars_index, dm_index))
-        }
-        self.prev_boundindex =  {
-            "stars" : stars_bound_index,
-            "darkmatter" : dm_bound_index,
-            "nbody" : np.concatenate((stars_bound_index, dm_bound_index))
-        }
-        
-        self.nbody = "nbody_static"
-        self.dm = "darkmatter_static"
-        self.stars = "stars_static"
-
-        self.data.clear_data()
-        
-    
-    def _initial_particle_filter(self):
-        """Creates an initial particle filter where gravitational sources are 'prev_boundbody'
-        """
-        yt.add_particle_filter(
-            "nbody_static", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_index["nbody"]),
-            filtered_type="nbody", 
-            requires=["particle_index"]
-        )
-        yt.add_particle_filter(
-            "stars_static", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_index["stars"]) ,
-            filtered_type="nbody_static", 
-            requires=["particle_index"]
-        )
-        yt.add_particle_filter(
-            "darkmatter_static", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_index["darkmatter"]),
-            filtered_type="nbody_static", 
-            requires=["particle_index"]
-        )
-        
-        self.ds.add_particle_filter("nbody_static")
-        self.ds.add_particle_filter("stars_static")
-        self.ds.add_particle_filter("darkmatter_static")
-       
-        
-        yt.add_particle_filter(
-            self.prev_boundbody, 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_boundindex["nbody"]),
-            filtered_type="nbody_static", 
-            requires=["particle_index"]
-        )
-        self.ds.add_particle_filter(self.prev_boundbody)
-        
-        
-
-    def _add_energy_filter(self, beta):
-        """Adds particle filters as stars_{# subtree} and darkmatter__{# subtree}
-        """
-        yt.add_particle_filter(
-            f"stars_{self.subtree}", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], data["stars_static", "particle_index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0),  
-            filtered_type="nbody_static", 
-            requires=["index", "grav_energy", "kinetic_energy"]
-        )
-        self.ds.add_particle_filter(f"stars_{self.subtree}")
-        yt.add_particle_filter(
-            f"darkmatter_{self.subtree}", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], data["darkmatter_static", "particle_index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0), 
-            filtered_type="nbody_static", 
-            requires=["index", "grav_energy", "kinetic_energy"]
-        )
-        self.ds.add_particle_filter(f"darkmatter_{self.subtree}")
-        yt.add_particle_filter(
-            f"nbody_{self.subtree}", 
-            function=lambda pfilter, data: (data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0, 
-            filtered_type="nbody_static", 
-            requires=["grav_energy", "kinetic_energy"]
-        )
-        self.ds.add_particle_filter(f"nbody_{self.subtree}")
-        
-        self.nbody = f"nbody_{self.subtree}"
-        self.stars = f"stars_{self.subtree}"
-        self.dm = f"darkmatter_{self.subtree}"
-        
-        
-    def compute_potential(self):
-        """Computes potential of all particles.
-        """
-        
-        self.ds.add_field(
-            name=("nbody_static", "grav_potential"),
-            function=lambda field, data: self.arr(
-                PotentialTarget(
-                    pos_target=data["nbody_static", "particle_position"].to("kpc"), 
-                    pos_source=data[self.prev_boundbody, "particle_position"].to("kpc"), 
-                    m_source=data[self.prev_boundbody, "particle_mass"].to("Msun"),
-                    softening_target=data["nbody_static", "softening"].to("kpc"), 
-                    softening_source=data[self.prev_boundbody, "softening"].to("kpc"),
-                    G=4.300917270038E-6, 
-                    theta=0.6,
-                    parallel=True,
-                    quadrupole=True
-                ), 
-                "km**2/s**2"
-            ),
-            sampling_type="local",
-            units="km**2/s**2",
-            force_override=True
-        )
-        self.ds.add_field(
-            name=("nbody_static", "grav_energy"),
-            function=lambda field, data: data["nbody_static", "grav_potential"] * data["nbody_static", "particle_mass"],
-            sampling_type="local",
-            units="Msun * km**2/s**2",
-            force_override=True
-        )
-        
-
-    def compute_kinetic(self, vcm=None):
-        """Computes kinetic energy of all particles.
-        """
-        if vcm is not None:
-            bulk_vel = vcm
-        else:
-            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.dm).to("km/s")
-
-        self.ds.add_field(
-            name=("nbody_static", "kinetic_energy"),
-            function=lambda field, data: 0.5 * data["nbody_static", "particle_mass"] * np.linalg.norm(data["nbody_static", "particle_velocity"] - bulk_vel, axis=1) ** 2,
-            sampling_type="local",
-            units="Msun * km**2/s**2",
-            force_override=True
-        )
-        
-        
-    def compute_energy(self, vcm=None, beta=0.95):
-        """Computes potential, kinetic and total energy all at once.
-        Boundness is determined using bulk velocity (see ROCKSTAR).
-        """
-        self.data.clear_data()
-        self.compute_kinetic(vcm=vcm)
-        self.compute_potential()
-        self.ds.add_field(
-            name=("nbody_static", "total_energy"),
-            function=lambda field, data: data["nbody_static", "grav_energy"] + data["nbody_static", "kinetic_energy"],
-            sampling_type="local",
-            units="Msun * km**2/s**2",
-            force_override=True
-        )
-        self._add_energy_filter(beta=beta)
-
 
 
 
