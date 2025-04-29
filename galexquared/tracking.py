@@ -18,6 +18,25 @@ from .mergertree import MergerTree
 from .class_methods import load_ftable, softmax, half_mass_radius, refine_6Dcenter
 
 
+from dataclasses import dataclass
+
+
+class data:
+    """Simple class to handle particle data, with an option to provide a mask
+    """
+    def __init__(self,
+                 sp,
+                 mask=None
+                ):
+        self._pos = 1
+        self._mass =1
+        self._velocity =1
+        self._idnex =1
+
+
+
+
+
 
 class HaloParticles:
     """Class that contains the particles (stellar and dark) that conform the halo. Has utilities for computing boundness,
@@ -54,6 +73,7 @@ class HaloParticles:
         self.cm = {}
         self.vcm = {}
         
+        self.bound_dm = self.dm
         
     @property
     def octree(self):
@@ -71,16 +91,16 @@ class HaloParticles:
     def _cm_nmostbound(self, N=32, f=0.1):
         """Returns the CoM computed with the N=min(32, f * Ntot) most bound particles
         """
-        Npart = int(np.rint(np.minimum(f * self.data[self.dm, "index"].shape[0], N)))
-        most_bound_ids = np.argsort(self.data[self.dm, "total_energy"])[:Npart]
+        Npart = int(np.rint(np.minimum(f * self.data[self.bound_dm, "particle_index"].shape[0], N)))
+        most_bound_ids = np.argsort(self.data[self.bound_dm, "total_energy"])[:Npart]
         
-        mask = np.zeros(len(self.data[self.dm, "index"]), dtype=bool)
+        mask = np.zeros(len(self.data[self.bound_dm, "particle_index"]), dtype=bool)
         mask[most_bound_ids] = True
         
         self.neff = Npart
 
-        tmp_cm = np.average(self.data[self.dm, "coordinates"][mask], axis=0, weights=self.data[self.dm, "mass"][mask])
-        tmp_vcm = np.average(self.data[self.dm, "velocity"][mask], axis=0, weights=self.data[self.dm, "mass"][mask]) 
+        tmp_cm = np.average(self.data[self.bound_dm, "particle_position"][mask], axis=0, weights=self.data[self.bound_dm, "particle_mass"][mask]).to("kpc")
+        tmp_vcm = np.average(self.data[self.bound_dm, "particle_velocity"][mask], axis=0, weights=self.data[self.bound_dm, "particle_mass"][mask]).to("km/s")
         return tmp_cm, tmp_vcm
     
     def _cm_softmax(self, T="adaptative"):
@@ -88,29 +108,29 @@ class HaloParticles:
                             w ~ e^-E/T 
         and T = | mean(kin) / min(E)| ~ 0.2
         """        
-        w = self.data[self.dm,"total_energy"]/self.data[self.dm,"total_energy"].min()
+        w = self.data[self.bound_dm,"total_energy"]/self.data[self.bound_dm,"total_energy"].min()
         if T == "adaptative":
-            T = np.abs(self.data[self.dm, "kinetic_energy"].mean()/self.data[self.dm,"total_energy"].min())
+            T = np.abs(self.data[self.bound_dm, "kinetic_energy"].mean()/self.data[self.bound_dm,"total_energy"].min())
             
         self.neff = 1 / np.sum(softmax(w, T)**2)
         self.T = T
-        tmp_cm = np.average(self.data[self.dm, "coordinates"], axis=0, weights=softmax(w, T))
-        tmp_vcm = np.average(self.data[self.dm, "velocity"], axis=0, weights=softmax(w, T))
+        tmp_cm = np.average(self.data[self.bound_dm, "particle_position"], axis=0, weights=softmax(w, T)).to("kpc")
+        tmp_vcm = np.average(self.data[self.bound_dm, "particle_velocity"], axis=0, weights=softmax(w, T)).to("km/s")
         return tmp_cm, tmp_vcm
     
     def _cm_deepest_potential(self, N=32, f=0.1):
         """Computes the center as the average position of the deepest particles in the potential
         """
-        Npart = int(np.rint(np.minimum(f * self.data[self.dm, "index"].shape[0], N)))
-        most_bound_ids = np.argsort(self.data[self.dm, "grav_potential"])[:Npart]
+        Npart = int(np.rint(np.minimum(f * self.data[self.bound_dm, "particle_index"].shape[0], N)))
+        most_bound_ids = np.argsort(self.data[self.bound_dm, "grav_potential"])[:Npart]
         
-        mask = np.zeros(len(self.data[self.dm, "index"]), dtype=bool)
+        mask = np.zeros(len(self.data[self.bound_dm, "particle_index"]), dtype=bool)
         mask[most_bound_ids] = True
         
         self.neff = Npart
 
-        tmp_cm = np.average(self.data[self.dm, "coordinates"][mask], axis=0, weights=self.data[self.dm, "mass"][mask])
-        tmp_vcm = np.average(self.data[self.dm, "velocity"][mask], axis=0, weights=self.data[self.dm, "mass"][mask]) 
+        tmp_cm = np.average(self.data[self.bound_dm, "particle_position"][mask], axis=0, weights=self.data[self.bound_dm, "particle_mass"][mask]).to("kpc")
+        tmp_vcm = np.average(self.data[self.bound_dm, "particle_velocity"][mask], axis=0, weights=self.data[self.bound_dm, "particle_mass"][mask]).to("km/s")
         return tmp_cm, tmp_vcm
 
     def _cm_no_potential(self, method, **kwargs):
@@ -123,7 +143,7 @@ class HaloParticles:
             method=method,
             **kwargs
         )
-        return self._cen_result["center"], self._cen_result["velocity"]
+        return self._cen_result["center"], self._cen_result["particle_velocity"]
 
 
 
@@ -283,8 +303,8 @@ class HaloParticles:
         """Computes the half mass radius
         """
         self.rhalf = half_mass_radius(
-            self.data[self.nbody, "coordinates"].to("kpc"), 
-            self.data[self.nbody, "mass"].to("Msun"), 
+            self.data[self.nbody, "particle_position"].to("kpc"), 
+            self.data[self.nbody, "particle_mass"].to("Msun"), 
             self.cm["darkmatter"], 
             X, 
             project=False
@@ -295,10 +315,10 @@ class HaloParticles:
         """Computes the maximum circular velocity and its radius.
         """
         nbins = min(nbins, 1000)
-        radii = np.linalg.norm(self.data[self.dm, "coordinates"] - self.cm["darkmatter"], axis=1).to("kpc")
+        radii = np.linalg.norm(self.data[self.dm, "particle_position"] - self.cm["darkmatter"], axis=1).to("kpc")
         bin_masses, bin_edges, bin_num = binned_statistic(
             radii,
-            self.data[self.dm, "mass"].to("Msun"),
+            self.data[self.dm, "particle_mass"].to("Msun"),
             statistic="sum",
             range=[2*soft.to("kpc").value, radii.max().to("kpc").value],
             bins=nbins
@@ -340,8 +360,8 @@ class HaloParticles:
         elif pt == "darkmatter":
             sp_pt = self.dm
             
-        positions = self.data[sp_pt, "coordinates"].to("kpc") - self.cm[pt]
-        masses = self.data[sp_pt, "mass"].to("Msun")
+        positions = self.data[sp_pt, "particle_position"].to("kpc") - self.cm[pt]
+        masses = self.data[sp_pt, "particle_mass"].to("Msun")
         if positions.shape[1] != 3:
             raise ValueError("Positions must have shape (N, 3)")
 
@@ -369,7 +389,7 @@ class HaloParticles:
         elif pt == "darkmatter":
             sp_pt = self.dm
             
-        positions = self.data[sp_pt, "coordinates"].to("kpc") - self.cm[pt]
+        positions = self.data[sp_pt, "particle_position"].to("kpc") - self.cm[pt]
         if positions.shape[1] != 3:
             raise ValueError("Positions must have shape (N, 3)")
         
@@ -445,50 +465,138 @@ class HaloParticlesOutside(HaloParticles):
                  sp,
                  particle_names
                  ):
-        super().__init__(subtree, sp, particle_names, "outside")
+        super().__init__(subtree, sp, particle_names)
         
        
+        
+    def _add_dmstars_fields(self):
+        """Extends particle fields to individual stars and dark-matter
+        """
+        # self.ds.add_field(
+        #     name=(self.stars, "grav_potential"),
+        #     function=lambda field, data:  data[self.nbody, "grav_potential"][np.isin(data[self.nbody, "particle_index"], data[self.stars, "particle_index"])],
+        #     sampling_type="particle",
+        #     units="km**2/s**2",
+        #     force_override=True
+        # )
+        # self.ds.add_field(
+        #     name=(self.stars, "grav_energy"),
+        #     function=lambda field, data: data[self.stars, "grav_potential"] * data[self.stars, "particle_mass"],
+        #     sampling_type="particle",
+        #     units="Msun * km**2/s**2",
+        #     force_override=True
+        # )
+        # self.ds.add_field(
+        #     name=(self.stars, "kinetic_energy"),
+        #     function=lambda field, data: data[self.nbody, "kinetic_energy"][np.isin(data[self.nbody, "particle_index"], data[self.stars, "particle_index"])], 
+        #     sampling_type="particle",
+        #     units="Msun * km**2/s**2",
+        #     force_override=True
+        # )
+        # self.ds.add_field(
+        #     name=(self.stars, "total_energy"),
+        #     function=lambda field, data: data[self.stars, "grav_energy"] + data[self.stars, "kinetic_energy"],
+        #     sampling_type="particle",
+        #     units="Msun * km**2/s**2",
+        #     force_override=True
+        # )
+        
+        
+        # self.ds.add_field(
+        #     name=(self.dm, "grav_potential"),
+        #     function=lambda field, data:  data[self.nbody, "grav_potential"][np.isin(data[self.nbody, "particle_index"], data[self.dm, "particle_index"])],
+        #     sampling_type="local",
+        #     units="km**2/s**2",
+        #     force_override=True
+        # )
+        # self.ds.add_field(
+        #     name=(self.dm, "grav_energy"),
+        #     function=lambda field, data: data[self.dm, "grav_potential"] * data[self.dm, "particle_mass"],
+        #     sampling_type="local",
+        #     units="Msun * km**2/s**2",
+        #     force_override=True
+        # )
+        # self.ds.add_field(
+        #     name=(self.dm, "kinetic_energy"),
+        #     function=lambda field, data: data[self.nbody, "kinetic_energy"][np.isin(data[self.nbody, "particle_index"], data[self.dm, "particle_index"])], 
+        #     sampling_type="local",
+        #     units="Msun * km**2/s**2",
+        #     force_override=True
+        # )
+        # self.ds.add_field(
+        #     name=(self.dm, "total_energy"),
+        #     function=lambda field, data: data[self.dm, "grav_energy"] + data[self.dm, "kinetic_energy"],
+        #     sampling_type="local",
+        #     units="Msun * km**2/s**2",
+        #     force_override=True
+        # )
+        
+        # (data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0, 
+
+        yt.add_particle_filter(
+            self.stars, 
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], data[self.stars, "particle_index"]),
+            filtered_type=self.nbody, 
+            requires=["particle_index"]
+        )
+        self.ds.add_particle_filter(self.stars)
+        
+        yt.add_particle_filter(
+            self.dm, 
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], data[self.dm, "particle_index"]),
+            filtered_type=self.nbody, 
+            requires=["particle_index"]
+        )
+        self.ds.add_particle_filter(self.dm)
+        
+
+        
     def _add_energy_filter(self, beta):
         """Adds particle filters as stars_{# subtree} and darkmatter__{# subtree}
         """
+        self.bound_nbody = self.nbody + f"_{self.subtree}"    #f"nbody_{self.subtree}"
+        self.bound_stars = self.stars + f"_{self.subtree}"    #f"stars_{self.subtree}"
+        self.bound_dm = self.dm + f"_{self.subtree}"          #f"darkmatter_{self.subtree}"
+        
         yt.add_particle_filter(
-            f"stars_{self.subtree}", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], data["stars", "index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0),  
-            filtered_type="nbody", 
-            requires=["index", "grav_energy", "kinetic_energy"]
-        )
-        self.ds.add_particle_filter(f"stars_{self.subtree}")
-        yt.add_particle_filter(
-            f"darkmatter_{self.subtree}", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], data["darkmatter", "index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0), 
-            filtered_type="nbody", 
-            requires=["index", "grav_energy", "kinetic_energy"]
-        )
-        self.ds.add_particle_filter(f"darkmatter_{self.subtree}")
-        yt.add_particle_filter(
-            f"nbody_{self.subtree}", 
+            self.bound_nbody, 
             function=lambda pfilter, data: (data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0, 
-            filtered_type="nbody", 
+            filtered_type=self.nbody, 
             requires=["grav_energy", "kinetic_energy"]
         )
-        self.ds.add_particle_filter(f"nbody_{self.subtree}")
+        self.ds.add_particle_filter(self.bound_nbody)
         
-        self.nbody = self.nbody + f"_{self.subtree}" #f"nbody_{self.subtree}"
-        self.stars = self.stars + f"_{self.subtree}" #f"stars_{self.subtree}"
-        self.dm = self.dm + f"_{self.subtree}"    #f"darkmatter_{self.subtree}"
+        yt.add_particle_filter(
+            self.bound_stars, 
+            function=lambda pfilter, data: (np.isin(data[pfilter.filtered_type, "particle_index"], data[self.stars, "particle_index"])) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0),  
+            filtered_type=self.nbody, 
+            requires=["particle_index", "grav_energy", "kinetic_energy"]
+        )
+        self.ds.add_particle_filter(self.bound_stars)
+        
+        yt.add_particle_filter(
+            self.bound_dm, 
+            function=lambda pfilter, data:  (np.isin(data[pfilter.filtered_type, "particle_index"], data[self.dm, "particle_index"])) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0), 
+            filtered_type=self.nbody, 
+            requires=["particle_index", "grav_energy", "kinetic_energy"]
+        )
+        self.ds.add_particle_filter(self.bound_dm)
+
+        
+
         
         
     def compute_potential(self):
         """Computes potential of all particles.
         """
         def _pot(field, data, obj=self):
-            n = data["nbody", "particle_mass"].shape[0]
+            n = data[obj.nbody, "particle_mass"].shape[0]
             octree = obj.octree
             return obj.arr( 
                 Potential(
-                    pos=data["nbody", "coordinates"].to("kpc"), 
-                    m=data["nbody", "particle_mass"].to("Msun"), 
-                    softening=None, #data["nbody", "softening"].to("kpc"),
+                    pos=data[obj.nbody, "particle_position"].to("kpc"), 
+                    m=data[obj.nbody, "particle_mass"].to("Msun"), 
+                    softening=None, 
                     G=4.300917270038E-6, 
                     theta=min( 0.6, 0.3 * (n / 1E3) ** 0.08 ),
                     parallel=False,
@@ -497,17 +605,18 @@ class HaloParticlesOutside(HaloParticles):
                 ), 
                 'km**2/s**2'
             )
+
         
         self.ds.add_field(
-            name=("nbody", "grav_potential"),
+            name=(self.nbody, "grav_potential"),
             function=_pot,
             sampling_type="local",
             units="km**2/s**2",
             force_override=True
         )
         self.ds.add_field(
-            name=("nbody", "grav_energy"),
-            function=lambda field, data: data["nbody", "grav_potential"] * data["nbody", "particle_mass"],
+            name=(self.nbody, "grav_energy"),
+            function=lambda field, data: data[self.nbody, "grav_potential"] * data[self.nbody, "particle_mass"],
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
@@ -519,11 +628,11 @@ class HaloParticlesOutside(HaloParticles):
         if vcm is not None:
             bulk_vel = vcm
         else:
-            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type="darkmatter").to("km/s")
+            bulk_vel = self.data.quantities.bulk_velocity(use_gas=False, use_particles=True, particle_type=self.dm).to("km/s")
 
         self.ds.add_field(
-            name=("nbody", "kinetic_energy"),
-            function=lambda field, data: 0.5 * data["nbody", "particle_mass"] * np.linalg.norm(data["nbody", "velocity"] - bulk_vel, axis=1) ** 2,
+            name=(self.nbody, "kinetic_energy"),
+            function=lambda field, data: 0.5 * data[self.nbody, "particle_mass"] * np.linalg.norm(data[self.nbody, "particle_velocity"] - bulk_vel, axis=1) ** 2,
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
@@ -537,12 +646,13 @@ class HaloParticlesOutside(HaloParticles):
         self.compute_kinetic(vcm=vcm)
         self.compute_potential()
         self.ds.add_field(
-            name=("nbody", "total_energy"),
-            function=lambda field, data: data["nbody", "grav_energy"] + data["nbody", "kinetic_energy"],
+            name=(self.nbody, "total_energy"),
+            function=lambda field, data: data[self.nbody, "grav_energy"] + data[self.nbody, "kinetic_energy"],
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
         )
+        self._add_dmstars_fields()
         self._add_energy_filter(beta=beta)
         
         
@@ -601,21 +711,21 @@ class HaloParticlesInside(HaloParticles):
         """
         yt.add_particle_filter(
             "nbody_static", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], self.prev_index["nbody"]),
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_index["nbody"]),
             filtered_type="nbody", 
-            requires=["index"]
+            requires=["particle_index"]
         )
         yt.add_particle_filter(
             "stars_static", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], self.prev_index["stars"]) ,
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_index["stars"]) ,
             filtered_type="nbody_static", 
-            requires=["index"]
+            requires=["particle_index"]
         )
         yt.add_particle_filter(
             "darkmatter_static", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], self.prev_index["darkmatter"]),
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_index["darkmatter"]),
             filtered_type="nbody_static", 
-            requires=["index"]
+            requires=["particle_index"]
         )
         
         self.ds.add_particle_filter("nbody_static")
@@ -625,9 +735,9 @@ class HaloParticlesInside(HaloParticles):
         
         yt.add_particle_filter(
             self.prev_boundbody, 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], self.prev_boundindex["nbody"]),
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], self.prev_boundindex["nbody"]),
             filtered_type="nbody_static", 
-            requires=["index"]
+            requires=["particle_index"]
         )
         self.ds.add_particle_filter(self.prev_boundbody)
         
@@ -638,14 +748,14 @@ class HaloParticlesInside(HaloParticles):
         """
         yt.add_particle_filter(
             f"stars_{self.subtree}", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], data["stars_static", "index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0),  
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], data["stars_static", "particle_index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0),  
             filtered_type="nbody_static", 
             requires=["index", "grav_energy", "kinetic_energy"]
         )
         self.ds.add_particle_filter(f"stars_{self.subtree}")
         yt.add_particle_filter(
             f"darkmatter_{self.subtree}", 
-            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "index"], data["darkmatter_static", "index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0), 
+            function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], data["darkmatter_static", "particle_index"]) & ((data[pfilter.filtered_type, "grav_energy"] + beta * data[pfilter.filtered_type, "kinetic_energy"]) < 0), 
             filtered_type="nbody_static", 
             requires=["index", "grav_energy", "kinetic_energy"]
         )
@@ -671,9 +781,9 @@ class HaloParticlesInside(HaloParticles):
             name=("nbody_static", "grav_potential"),
             function=lambda field, data: self.arr(
                 PotentialTarget(
-                    pos_target=data["nbody_static", "coordinates"].to("kpc"), 
-                    pos_source=data[self.prev_boundbody, "coordinates"].to("kpc"), 
-                    m_source=data[self.prev_boundbody, "mass"].to("Msun"),
+                    pos_target=data["nbody_static", "particle_position"].to("kpc"), 
+                    pos_source=data[self.prev_boundbody, "particle_position"].to("kpc"), 
+                    m_source=data[self.prev_boundbody, "particle_mass"].to("Msun"),
                     softening_target=data["nbody_static", "softening"].to("kpc"), 
                     softening_source=data[self.prev_boundbody, "softening"].to("kpc"),
                     G=4.300917270038E-6, 
@@ -689,7 +799,7 @@ class HaloParticlesInside(HaloParticles):
         )
         self.ds.add_field(
             name=("nbody_static", "grav_energy"),
-            function=lambda field, data: data["nbody_static", "grav_potential"] * data["nbody_static", "mass"],
+            function=lambda field, data: data["nbody_static", "grav_potential"] * data["nbody_static", "particle_mass"],
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
@@ -706,7 +816,7 @@ class HaloParticlesInside(HaloParticles):
 
         self.ds.add_field(
             name=("nbody_static", "kinetic_energy"),
-            function=lambda field, data: 0.5 * data["nbody_static", "mass"] * np.linalg.norm(data["nbody_static", "velocity"] - bulk_vel, axis=1) ** 2,
+            function=lambda field, data: 0.5 * data["nbody_static", "particle_mass"] * np.linalg.norm(data["nbody_static", "particle_velocity"] - bulk_vel, axis=1) ** 2,
             sampling_type="local",
             units="Msun * km**2/s**2",
             force_override=True
