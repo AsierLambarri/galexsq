@@ -537,10 +537,14 @@ class MergerTree:
         return new_merge
 
 
-    def subtree(self, subtree):
+    def subtree(self, subtree, snapshot=None):
         """Returns the given subtree
         """
-        return self.CompleteTree[self.CompleteTree["Sub_tree_id"] == subtree]
+        if snapshot is None:
+            return self.CompleteTree[self.CompleteTree["Sub_tree_id"] == subtree]
+        else:
+            subtree = self.CompleteTree[self.CompleteTree["Sub_tree_id"] == subtree]
+            return subtree[subtree["Snapshot"] == snapshot]
 
 
     def select_halos(self, Rvir=1, **constraints):

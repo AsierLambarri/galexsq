@@ -4,6 +4,9 @@ from .orbit_interpolation import PhaseSpaceInstant, Orbis, GetICSList, Cartesian
 
 from .tracking_yt import Tracker, HaloParticles, HaloParticlesOutside, HaloParticlesInside
 from .tracking_noyt import Tracker, HaloParticles, HaloParticlesOutside, HaloParticlesInside
+from .tracking_no_acc import ParticleTracker, HaloParticles, HaloParticlesInside 
+
+
 
 from .structure import *
 
