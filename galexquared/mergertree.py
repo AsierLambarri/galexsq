@@ -12,6 +12,7 @@ from .data_container import DataContainer
 from .class_methods import load_ftable
 from .config import config
 
+
 class MergerTree:
     """Easy manage of merger trees, with the specific purpose of extracting galaxies with desired parameters and qualities. Although
     it may do more things than just that depending on what the stage you catch me -the author-, in.
@@ -391,9 +392,11 @@ class MergerTree:
         birth_snap = ()
         birth_distance = ()
         desc_arr = ()
-        
-        CompleteTree['host_distance'] = np.zeros( len(CompleteTree) )
+
         n = len(SelectedTree["Sub_tree_id"].unique())
+        if not "host_distance" in CompleteTree.columns:
+            CompleteTree['host_distance'] = np.zeros( len(CompleteTree) )
+            
         for i in tqdm(range(n), desc="Running over Subtrees", ncols=100):
             subtree = SelectedTree["Sub_tree_id"].unique()[i]
             SubTree = SelectedTree[SelectedTree['Sub_tree_id'] == subtree].sort_values('Snapshot', ascending=False)
@@ -505,10 +508,33 @@ class MergerTree:
             'Sub_tree_id': spike_tree_id, 'Snapshot_spike': snap_spike, "birth_snapshot": birth_snap, "birth_R/Rvir": birth_distance, 'final_desc_uid': desc_arr
         }
         
-        self.MergeInfo = pd.DataFrame(data = d).sort_values("Sub_tree_id")
-        self.SpikeInfo = pd.DataFrame(data = s).sort_values("Sub_tree_id")
+        if hasattr(self, "MergeInfo"):
+            self.MergeInfo = pd.concat([self.MergeInfo, pd.DataFrame(data = d).sort_values("Sub_tree_id")])
+            self.SpikeInfo = pd.concat([self.MergeInfo, pd.DataFrame(data = s).sort_values("Sub_tree_id")])
+        else:
+            self.MergeInfo = pd.DataFrame(data = d).sort_values("Sub_tree_id")
+            self.SpikeInfo = pd.DataFrame(data = s).sort_values("Sub_tree_id")
 
         self.set_trees(CompleteTree)
+
+    def thinn_catalogue(self, thinned_snapshot):
+        """Provides a way to thinn the equivalence table and MergerTrees to some snapshot_values 
+        if the user doesn't have access to all the snapshots. Thinning to very coarse time steps might 
+        lead to untrackability of halos.
+        """
+        new_merge = MergerTree(self._CompleteTree[self._CompleteTree["Snapshot"].isin(thinned_snapshot)].sort_values("Snapshot").reset_index(drop=True))
+        new_merge.set_equivalence(self._equiv[self._equiv["snapshot"].isin(thinned_snapshot)].reset_index(drop=True)) 
+
+        if hasattr(self, "MergeInfo"):
+            new_merge.MergeInfo = self.MergeInfo
+
+            new_merge.MergeInfo['Snapshot'] = new_merge.MergeInfo['Snapshot'].transform(lambda x: max([s for s in thinned_snapshot if s <= x], default=min(thinned_snapshot)))
+            new_merge.MergeInfo['crossing_snap'] = new_merge.MergeInfo['crossing_snap'].transform(lambda x: max([s for s in thinned_snapshot if s <= x], default=min(thinned_snapshot)))
+            new_merge.MergeInfo['crossing_snap_2'] = new_merge.MergeInfo['crossing_snap_2'].transform(lambda x: max([s for s in thinned_snapshot if s <= x], default=min(thinned_snapshot)))
+            
+            new_merge.SpikeInfo = self.SpikeInfo
+            
+        return new_merge
 
 
     def subtree(self, subtree):
