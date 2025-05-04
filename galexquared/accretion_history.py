@@ -719,6 +719,162 @@ class AccretionHistory:
                 dset = f.create_dataset("data", data=structured_array)
         
                 dset.attrs["columns"] = np.array(df.columns.values, dtype=h5py.string_dtype(encoding='utf-8'))
+        else:
+            raise Exception("Non supported format")
+
+
+    def load(self, name):
+        """Loads self.accreted_particles
+        """
+        if name.endswith(".csv"):
+            self.accreted_particles = pd.read_csv(name, index=False)
+        elif name.endswith(".hdf5") or name.endswith(".h5") or name.endswith(".h") or name.endswith(".hdf"):
+            import h5py
+            with h5py.File(name, "r") as f:
+                dset = f["data"]
+                data = dset[:]
+                columns = list(dset.attrs["columns"])
+        
+                self.accreted_particles = pd.DataFrame.from_records(data, columns=columns)
+        else:
+            raise Exception("Non supported format")
+
+
+
+
+class AccretionHistoryResult:
+    """Stores and allows to manipulate results created through accretion history.
+    """
+
+    def __init__(self, 
+                 fn=None
+                ):
+        if fn is not None:
+            self.load(fn)
+
+
+    def apply_delta_filter(self):
+        """Function that allows you to apply delta filter afterwards. Does not change internal state of class.
+        """
+        self._snap_particles = {}
+        for snapshot in self.accreted_particles["Snapshot"].unique():
+            self._snap_particles[snapshot] = self.accreted_particles[self.accreted_particles["Snapshot"] == snapshot]
+            self._snap_particles[snapshot] = self._delta_fitering(snapshot)
+
+
+    def _reconstruct_snapshot(self, snap):
+        """Reconstruct subtree mapping at snapshot=snap by taking the last
+        delta event ≤ snap for each particle.
+        """
+        short_snap = self.accreted_particles[self.accreted_particles["Snapshot"] <= snap]
+    
+        last = (
+            short_snap
+            .sort_values("Snapshot")                           # ascending
+            .drop_duplicates("particle_index", keep="last")    # keep the largest‑Snapshot row
+            .loc[:, ["particle_index", "Sub_tree_id"]]
+        )
+        
+        last["Snapshot"] = snap
+        last["Time"] = self.equiv[self.equiv["snapshot"] == snap]["time"].values[0]
+        
+        return last[["particle_index", "Snapshot", "Time", "Sub_tree_id"]]
+
+
+    def _track_particle(self, pid_list):
+        """Return the delta events for the given particle(s), in ascending snapshot order.
+        """
+        mapping = self.equiv.rename(columns={"snapshot": "Snapshot", "time": "Time"}).set_index("Snapshot")["Time"]
+        short_track = self.accreted_particles[self.accreted_particles["particle_index"].isin(pid_list)]
+        if short_track.empty:
+            return pd.DataFrame(columns=["particle_index", "Snapshot", "Sub_tree_id"])
+        else:
+            track = []
+            for pid in pid_list:
+                pid_track = short_track[short_track["particle_index"] == pid]
+                full_track = self.equiv[self.equiv["snapshot"] <= pid_track["Snapshot"].max()][["snapshot"]]
+                full_track.rename(columns={"snapshot" : "Snapshot"}, inplace=True)
+                for col in full_track.columns:
+                    full_track[col] = full_track[col].astype(pid_track[col].dtype)
+                merged = pd.merge_asof(
+                    full_track.sort_values("Snapshot"),
+                    pid_track.sort_values("Snapshot"),
+                    on="Snapshot",
+                    direction="backward"
+                )
+                merged["Time"] = merged["Snapshot"].map(mapping).fillna(merged["Time"])
+                track.append(merged)
+            return pd.concat(track).reset_index(drop=True)[["particle_index", "Snapshot", "Time", "Sub_tree_id"]]
+                
+        
+    def query(self, *, snapshot=None, particle_index=None):
+        """Query subtree assignments.
+
+        Parameters
+        ----------
+        snapshot : int or list of int, optional
+            One or more snapshot IDs.
+        particle_index : int or list of int, optional
+            One or more particle IDs.
+
+        Returns
+        -------
+        pd.DataFrame with columns ["snapshot","particle_index","subtree"].
+        """        
+        if snapshot is None and particle_index is None:
+            raise ValueError("At least one of 'snapshot' or 'particle_index' must be provided.")
+
+        snaps = ([snapshot] if not isinstance(snapshot, collections.abc.Sequence) 
+                  else list(snapshot)) if snapshot is not None else None
+        pids  = ([particle_index] if not isinstance(particle_index, collections.abc.Sequence) 
+                  else list(particle_index)) if particle_index is not None else None
+
+        if snaps is not None and pids is not None:
+            parts = [ self._reconstruct_snapshot(s) for s in snaps ]
+            df = pd.concat(parts, ignore_index=True) if len(parts)>1 else parts[0]
+            return df[df["particle_index"].isin(pids)].reset_index(drop=True)
+
+        if snaps is not None:
+            parts = [ self._reconstruct_snapshot(s) for s in snaps ]
+            return pd.concat(parts, ignore_index=True).reset_index(drop=True)
+
+        return self._track_particle(pids)
+    
+    def query_subtree(self, subtree, snapshot):
+        """Returns all the particles inside a given subtree at snapshot snap
+        """
+        snaps = ([snapshot] if not isinstance(snapshot, collections.abc.Sequence) 
+                  else list(snapshot)) if snapshot is not None else None
+        parts = []
+        for s in snaps:
+            res = self._reconstruct_snapshot(s)
+            if not res.empty:
+                parts.append(res[res["Sub_tree_id"] == subtree])
+        #parts = [res[res["Sub_tree_id"] == subtree] for s in snaps if (res := self._reconstruct_snapshot(s))]
+        reconstructed_snap = pd.concat(parts, ignore_index=True).reset_index(drop=True)
+        return  reconstructed_snap[reconstructed_snap["Sub_tree_id"] == subtree]
+
+
+
+    def save(self, name, format="hdf5", **kwargs):
+        """Saves self.accreted_particles
+        """
+        if format == "csv":
+            self.accreted_particles.to_csv(name, index=False)
+        elif format == "hdf5":
+            import h5py
+            df = self.accreted_particles
+            with h5py.File(name, "w") as f:
+                structured_dtype = np.dtype([
+                    (col, df[col].dtype) for col in df.columns
+                ])
+                structured_array = np.empty(len(df), dtype=structured_dtype)
+                for col in df.columns:
+                    structured_array[col] = df[col].values
+        
+                dset = f.create_dataset("data", data=structured_array)
+        
+                dset.attrs["columns"] = np.array(df.columns.values, dtype=h5py.string_dtype(encoding='utf-8'))
                 #dset.attrs["dtypes"] = np.array([str(df[col].dtype) for col in df.columns], dtype=h5py.string_dtype(encoding='utf-8'))
         else:
             raise Exception("Non supported format")
@@ -739,6 +895,11 @@ class AccretionHistory:
                 self.accreted_particles = pd.DataFrame.from_records(data, columns=columns)
         else:
             raise Exception("Non supported format")
+
+
+
+        
+            
         
 
 
