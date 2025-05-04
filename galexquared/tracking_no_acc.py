@@ -693,44 +693,60 @@ class HaloParticlesInside(HaloParticles):
 
 
 
-def _extract_particles(subtree, ds, pdir2, row, row2):
+def _extract_particles_infall(subtree, sp, row, unyt_arr):
     """Returns particle indices that are bound (AGORA VII)
     """
-    cen = row[["position_x", "position_y", "position_z"]].values[0]
-    rvir = row["virial_radius"].values[0]
-    sp = ds.sphere((cen, 'kpccm'), (2 * rvir, 'kpccm'))
-    
-    potential = ds.arr(Potential(
-        pos=sp["nbody", "particle_position"].to("kpc"), 
-        m=sp["nbody", "particle_mass"].to("Msun"),
+    from time import time
+    st = time()
+    pos = sp["nbody", "particle_position"].to("kpc")
+    mass = sp["nbody", "particle_mass"].to("Msun")
+    ft = time()
+    potential = unyt_arr(Potential(
+        pos=pos, 
+        m=mass,
         softening=None, 
         G=4.300917270038E-6, 
-        parallel=False
+        parallel=True
     ), 
     'km**2/s**2'
     )
-    grav_energy = potential * sp["nbody", "particle_mass"].to("Msun")
+    ft1 = time()
+    n = len(sp["nbody", "particle_mass"])
     
-    vel = ds.arr(row[["velocity_x", "velocity_y", "velocity_z"]].values[0], 'km/s')
+    grav_energy = potential * sp["nbody", "particle_mass"].to("Msun")
+    del potential
+    vel = unyt_arr(row[["velocity_x", "velocity_y", "velocity_z"]].values[0], 'km/s')
     kinetic = 0.5 * sp["nbody", "particle_mass"].to("Msun") * np.linalg.norm(sp["nbody", "particle_velocity"].to("km/s") - vel, axis=1)**2
     
     mask = (kinetic + grav_energy < 0)
     index_sel1 = sp["nbody", "particle_index"][mask].astype(int).value
-
-    del sp, potential, grav_energy, kinetic, mask
-    gc.collect()
     
-    ds2 = yt.load(pdir2)
-    cen = row2[["position_x", "position_y", "position_z"]].values[0]
-    rvir = row2["virial_radius"].values[0]
-    sp = ds2.sphere((cen, 'kpccm'), (rvir, 'kpccm'))
-    index_sel2 = sp["nbody", "particle_index"].astype(int).value
-    return np.unique(
-            np.concatenate(( index_sel1, index_sel2 ))
-        )
+    del sp
+    del grav_energy, kinetic, mask
+    gc.collect()
+    ft2 = time()
 
-def _extract_particles_wrapper(task):
-    return _extract_particles(*task)
+    print(f"{subtree}, data extraction: {ft-st}s, Potential for n={n}: {ft1 - ft}s, rest={ft2-ft1}s")
+    return index_sel1
+
+
+def _extract_particles_ptoinfall(subtree, file, row):
+    """Returns particle indices that are bound (AGORA VII)
+    """
+    cen = row[["position_x", "position_y", "position_z"]].values[0]
+    rvir = row["virial_radius"].values[0]
+
+    ds = yt.load(file)
+    sp = ds.sphere((cen, 'kpccm'), (rvir, 'kpccm'))
+    
+    return sp["nbody", "particle_index"].astype(int).value
+
+
+def _extract_particles_infall_wrapper(task):
+    return _extract_particles_infall(*task)
+def _extract_particles_ptoinfall_wrapper(task):
+    return _extract_particles_ptoinfall(*task)
+
 
 
 class ParticleTracker:
@@ -769,6 +785,10 @@ class ParticleTracker:
         
         self._merge_info = None #self.mergertree.MergeInfo
         self._faulty = None     #self.mergertree.SpikeInfo
+
+        self.particles_index_dict_infall = {}
+        self.particles_index_dict_prior = {}
+
     
     @property
     def CompleteTree(self):
@@ -817,7 +837,18 @@ class ParticleTracker:
     def ts(self):
        return yt.DatasetSeries(self._files) 
 
+    @property
+    def particles_index_dict(self):
+        assert np.unique(self.particles_index_dict_infall.keys()) == np.unique(self.particles_index_dict_prior.keys()), "Somehow, the selection skipped some infall/prior moments!"
+        merged = {}
+        for key in np.unique(self.particles_index_dict_infall.keys()):
+            merged[key] = np.unique(
+                np.concatenate(( self.particles_index_dict_infall[key], self.particles_index_dict_prior[key] ))
+            )
+        return merged
 
+
+    
     def _snap_to_index(self, snap):
         """Translates snapshot to index.
         """
@@ -994,37 +1025,56 @@ class ParticleTracker:
 
         from tqdm import tqdm
 
-        yt.utilities.logger.ytLogger.setLevel(40)
+        #yt.utilities.logger.ytLogger.setLevel(40)
 
-        tasks = []
+        nproc = min(int(kwargs.get("parallel", 1)), len(inserted_halos))
+        pool = mp.Pool(nproc)
+        if nproc > 6: warnings.warn(f"Having nproc={nproc} may fuck up your cache.")
+
+
+        ds = self.ds
+        
+        tasks_infall = []
+        tasks_prior = []
         for subtree in inserted_halos:
-            subtree_table = self.mergertree.subtree(subtree)
             merge = self.MergeInfo[self.MergeInfo["Sub_tree_id"] == subtree]
-            row = subtree_table.loc[subtree_table["Snapshot"] ==  merge["crossing_snap"].values[0]]
-            row2 = subtree_table.loc[subtree_table["Snapshot"] ==  merge["crossing_snap_2"].values[0]]
-            
-            pdir2 = self.equiv[ self.equiv["snapshot"] == merge["crossing_snap_2"].values[0] ]["snapname"].values[0] 
+            row_infall = self.mergertree.subtree(subtree, snapshot=merge["crossing_snap"].values[0])
+            row_prior = self.mergertree.subtree(subtree, snapshot=merge["crossing_snap_2"].values[0])
 
-            tasks.append((
+            assert int(self.equiv[self.equiv["snapshot"] == merge["crossing_snap"].values[0]].index[0]) == self._snap_to_index(merge["crossing_snap"].values[0]), "file selection fucked up"
+            file_infall = self._files[self._snap_to_index(merge["crossing_snap"].values[0])]
+            file_prior = self._files[self._snap_to_index(merge["crossing_snap_2"].values[0])]
+
+            cen = row_infall[["position_x", "position_y", "position_z"]].values[0]
+            rvir = row_infall["virial_radius"].values[0]
+            sphere = ds.sphere((cen, 'kpccm'), (2 * rvir, 'kpccm'))
+            
+            tasks_infall.append((
                 subtree,
-                self.ds,
-                self.sim_dir + "/" + pdir2,
-                row,
-                row2
+                sphere,
+                row_infall,
+                ds.arr
+            ))
+            tasks_prior.append((
+                subtree,
+                file_prior,
+                row_prior
             ))
 
+            del sphere
 
-        nproc = int(kwargs.get("parallel", 1))
-        chsize = kwargs.get("chunksize", len(tasks) // (4*nproc))
+            
+        chsize = kwargs.get("chunksize", len(tasks_prior) // (4*nproc) + 1)
 
-        pool = mp.Pool(nproc)
-        if nproc > 4: warnings.warn(f"Having nproc={nproc} may fuck up your cache.")
-
-        chsize = kwargs.get("chunksize", len(tasks) // (4*nproc) + 1)
         for i, particle_list in enumerate(
-            tqdm(pool.imap(_extract_particles_wrapper, tasks, chunksize=chsize), total=len(tasks), desc="Selecting particles...")
+            tqdm(pool.imap(_extract_particles_ptoinfall_wrapper, tasks_prior, chunksize=chsize), total=len(tasks_prior), desc="Selecting particles prior to infall...")
         ):
-            self.particles_index_dict[tasks[i][0]] = particle_list
+            self.particles_index_dict_prior[tasks_prior[i][0]] = particle_list
+  
+        for i, particle_list in enumerate(
+            tqdm(pool.imap(_extract_particles_infall_wrapper, tasks_infall, chunksize=chsize), total=len(tasks_infall), desc="Selecting particles at infall...")
+        ):
+            self.particles_index_dict_infall[tasks_infall[i][0]] = particle_list
 
         pool.close()
         pool.join()
