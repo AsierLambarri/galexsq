@@ -40,7 +40,7 @@ class HaloParticlesInside_Grav(HaloParticles):
         """Computes potential of all particles.
         """
         st = time()
-        n = self.data[self.nbody, "particle_index"].shape[0]
+        self.n = self.data[self.nbody, "particle_index"].shape[0]
         nbody_grav_potential = self.arr( PotentialTarget(
                 pos_target=self.data[self.nbody, "particle_position"].to("kpc"), 
                 softening_target=None, 
@@ -51,7 +51,7 @@ class HaloParticlesInside_Grav(HaloParticles):
             
                 G=4.300917270038E-6, 
             
-                theta=min( 0.7, 0.4 * (n / 1E3) ** 0.1 ),
+                theta=min( 0.7, 0.4 * (self.n / 1E3) ** 0.1 ),
                 quadrupole=True,
                 tree=self.octree,
             
@@ -155,17 +155,28 @@ class HaloParticlesInside_Grav(HaloParticles):
         bound_indices = self.data[self.nbody, "particle_index"][mask]
         self.data.add_bound_mask(bound_indices)
 
-        self.bound_nbody = self.nbody + f"_bound"
-        self.bound_stars = self.stars + f"_bound"
-        self.bound_dm = self.dm + f"_bound"
+        self.bound_nbody = self.nbody + "_bound"
+        self.bound_stars = self.stars + "_bound"
+        self.bound_dm = self.dm + "_bound"
         
         
     def double_pass_unbinding(self, vcm=None, beta=0.95, **kwargs):
         """Performs a single pass unbinding to determine particle belongings and compute interesting quantities
         """
+        results = {}
+
         self.compute_energy(vcm, beta)
-        cm, vcm = self.cm_softmax()
+        _, _ = self.cm_softmax()
         self.compute_kinetic()
         
+        results["cm"], _ = self.cm_softmax()
+
+        
+        results["rh"] = self.X_mass_radius()
+        results["rvir"], results["mvir"] = self.overdensity_radius()
+        results["rmax"], results["vmax"]= self.vmax_rmax(self.ds.quan(0.08, 'kpc'), max(15, np.sqrt(self.n)))
+        results["conc"], results["rs"] = self.rs_klypin()
+        results["cv"] = self.cv
+        results["vcm"] = self.rockstar_velocity()
         
 

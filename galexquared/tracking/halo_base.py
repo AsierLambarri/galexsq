@@ -281,6 +281,7 @@ class HaloParticles:
         index_vmax = np.argmax(circular_velocity)
         self.vmax = circular_velocity[index_vmax].to("km/s")
         self.rmax = bin_radii[index_vmax].to("kpc")
+        self.cv = (2 * (self.vmax / self.rmax * 1/self.cosmo.hubble_constant)**2 ).to("")
         return self.rmax, self.vmax
 
     def rs_klypin(self):
