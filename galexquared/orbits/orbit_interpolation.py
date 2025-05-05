@@ -16,9 +16,9 @@ from gala.units import UnitSystem
 
 from pytreegrav import PotentialTarget, AccelTarget, Potential, ConstructTree
 
-from .class_methods import load_ftable
-from .mergertree import MergerTree
-from .config import config
+from ..class_methods import load_ftable
+from ..mergertree import MergerTree
+from ..config import config
 
 from copy import copy, deepcopy
 

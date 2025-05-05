@@ -5,8 +5,8 @@ import sys
 import numpy as np
 import pandas as pd
 
-from .mergertree import MergerTree
-from .config import config
+from ..mergertree import MergerTree
+from ..config import config
 
 from copy import copy, deepcopy
 from tqdm import tqdm

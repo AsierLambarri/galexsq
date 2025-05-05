@@ -19,10 +19,10 @@ def particle_unbinding_fire(data_source,
     FIREbox papers. Note that energies are not computed at any time, rather, cuts on position
     and velocity are imposed based on halo rotation curve moments vrms and vmax.
     """
-    pos = data_source[ptype, "coordinates"]
-    vels = data_source[ptype, "velocity"]
-    masses = data_source[ptype, "mass"]
-    pindices = data_source[ptype, "index"]
+    pos = data_source[ptype, "particle_position"].to("kpc")
+    vels = data_source[ptype, "particle_velocity"].to("km/s")
+    masses = data_source[ptype, "particle_mass"].to("Msun")
+    pindices = data_source[ptype, "particle_index"]
     return compute_stars_in_halo(
         pos,
         masses,
