@@ -463,7 +463,8 @@ class AccretionHistory:
         else:
             self.particle_indexes = indices.astype(int)
             mask = np.isin(sp[self._ptype, "particle_index"], self.particle_indexes)
-
+            
+        self.npart = len(self.particle_indexes)
         self.creation_times = sp[self._ptype, "particle_creation_time"][mask].to("Gyr")
         self.snapshot_creation_times = self._assign_t_snap(self.creation_times.value)
         
@@ -507,6 +508,7 @@ class AccretionHistory:
         """
         yt.utilities.logger.ytLogger.setLevel(40)
 
+        self.accretion_id = subtree
         self._snap_particles = {}
         self.select_accreted_particles(subtree, ptype, z=z, t=t, indices=indices, **kwargs)
         
@@ -698,6 +700,83 @@ class AccretionHistory:
         reconstructed_snap = pd.concat(parts, ignore_index=True).reset_index(drop=True)
         return  reconstructed_snap[reconstructed_snap["Sub_tree_id"] == subtree]
 
+    
+    def reduce_accretion(self):
+        """
+        For each particle in self.accreted_particles that ultimately ends up in
+        self.accretion_id (or –1 treated as the same), find the last subtree it
+        occupied *before* that final accretion into main/–1.
+    
+        Returns
+        -------
+        pd.DataFrame
+          Columns: ['particle_index','preceding_subtree']
+          One row per unique particle in self.accreted_particles.
+        """
+        main = self.accretion_id
+        df = self.accreted_particles[['particle_index','Snapshot','Sub_tree_id']]
+    
+        # 1) Identify "final" states: main_subtree or -1
+        finals = {main, -1}
+        
+        # 2) All events *not* in finals—these are candidate preceding states
+        nonfinal = df[~df['Sub_tree_id'].isin(finals)]
+        
+        # 3) For each particle, find the *last* non-final snapshot (if any)
+        last_nf = (
+            nonfinal
+            .groupby('particle_index', as_index=False)
+            .agg(last_snap=('Snapshot','max'))
+        )
+        
+        # 4) Pull out the subtree at that last non-final snapshot
+        if not last_nf.empty:
+            last_nf = last_nf.merge(
+                df,
+                left_on=['particle_index','last_snap'],
+                right_on=['particle_index','Snapshot'],
+                how='left'
+            )
+            preceding_nf = last_nf[['particle_index','Sub_tree_id']]\
+                .rename(columns={'Sub_tree_id':'preceding_subtree'})
+        else:
+            preceding_nf = pd.DataFrame(columns=['particle_index','preceding_subtree'])
+        
+        # 5) Particles that never had a non-final event:
+        all_pids = df['particle_index'].unique()
+        pids_with_nf = preceding_nf['particle_index'].unique()
+        pids_only_finals = np.setdiff1d(all_pids, pids_with_nf, assume_unique=True)
+        
+        if len(pids_only_finals):
+            # 6) For those, look at their *first* event (birth):
+            birth = (
+                df[df['particle_index'].isin(pids_only_finals)]
+                .sort_values(['particle_index','Snapshot'])
+                .groupby('particle_index', as_index=False)
+                .first()
+            )
+            # 7) If born unbound (-1) → preceding = -1, else → preceding = main
+            birth['preceding_subtree'] = np.where(
+                birth['Sub_tree_id'] == -1,
+                -1,
+                main
+            )
+            preceding_birth = birth[['particle_index','preceding_subtree']]
+        else:
+            preceding_birth = pd.DataFrame(columns=['particle_index','preceding_subtree'])
+        
+        # 8) Combine and return
+        result = pd.concat([preceding_nf, preceding_birth], ignore_index=True)
+        # ensure one row per particle:
+        result = result.drop_duplicates('particle_index', keep='first').reset_index(drop=True)
+        
+        counts_df = (
+            result
+            .groupby('preceding_subtree', as_index=False)
+            .size()
+            .rename(columns={'preceding_subtree':'Sub_tree_id','size':'npart'})
+        )
+        return result, counts_df
 
 
     def save(self, name, format="hdf5", **kwargs):
@@ -738,6 +817,11 @@ class AccretionHistory:
                 self.accreted_particles = pd.DataFrame.from_records(data, columns=columns)
         else:
             raise Exception("Non supported format")
+
+
+
+
+
 
 
 
@@ -919,7 +1003,38 @@ class AccretionHistoryResult:
 
 
 
-
+    # def reduce_accretion(self):
+    #     """
+    #     For each particle whose last recorded Sub_tree_id == main_subtree,
+    #     find the Sub_tree_id it occupied just before merging into main_subtree.
+    
+    #     Returns
+    #     -------
+    #     pd.DataFrame
+    #         Columns: ['particle_index', 'preceding_subtree']
+    #     """
+    #     main_subtree =  self.accretion_id
+    #     df = self.accreted_particles
+    
+    #     # 1) Sort by particle and snapshot so we can shift correctly
+    #     df_sorted = df.sort_values(['particle_index','Snapshot'], ignore_index=True)
+    
+    #     # 2) Compute the "previous subtree" for each event
+    #     prev_sub = df_sorted.groupby('particle_index')['Sub_tree_id'].shift(1)
+    
+    #     # 3) Identify the rows where a particle enters main_subtree
+    #     mask_merge = df_sorted['Sub_tree_id'] == main_subtree
+    #     df_merge = df_sorted.loc[mask_merge, ['particle_index']].copy()
+    
+    #     # 4) For each of those, grab its preceding subtree (or main_subtree if none)
+    #     df_merge['preceding_subtree'] = (
+    #         prev_sub[mask_merge]
+    #         .fillna(main_subtree)                 # if no prior, use main_subtree itself
+    #         .astype(df_sorted['Sub_tree_id'].dtype)
+    #         .values
+    #     )
+    
+    #     return df_merge.reset_index(drop=True)
 
 
 
