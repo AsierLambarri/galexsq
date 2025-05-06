@@ -38,6 +38,8 @@ def _goofy_mass_scaling(max_mass, min_mass):
 
     return dtype, scale_mass
 
+    
+
 def _check_particle_uniqueness(data):
     """Checks that particles are not born twice!
     """
@@ -62,7 +64,15 @@ def _nfw_potential(r, mvir, rs, c, G, soft):
     return -G * mvir * rs / A_nfw * np.log(1 + x) / x 
 
 
-def assign_particle_positions(merger_df, particle_indices, particle_positions, particle_velocities, compute_potential=True, type_list=None):
+def assign_particle_positions(
+        merger_df, 
+        particle_indices, 
+        particle_positions, 
+        particle_velocities, 
+        compute_potential=True, 
+        assignment="most-bound",                      
+        type_list=None
+    ):
     """Checks the position of the particles in one snapshot and finds to which halo they belong
 
     Parameters
@@ -83,6 +93,7 @@ def assign_particle_positions(merger_df, particle_indices, particle_positions, p
     """
     from scipy.spatial import KDTree
 
+    assert assignment in ("most-massive", "least-massive", "most-bound"), "assignment must be 'massive', 'lightest' or 'boundest'"
     assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
     redshift = merger_df["Redshift"].values[0]
 
@@ -95,7 +106,8 @@ def assign_particle_positions(merger_df, particle_indices, particle_positions, p
             "Snapshot": np.uint32,
             "Sub_tree_id": np.int64,
             "Assigned_Halo_Mass": np.float64,  
-            "mass_scale": 1
+            "mass_scale": 1,
+            "velocity_scale": 1
         }
     particles_df = pd.DataFrame({
         'particle_index': particle_indices,
@@ -104,11 +116,28 @@ def assign_particle_positions(merger_df, particle_indices, particle_positions, p
 
     })
     particles_df['Sub_tree_id'] = -1
-    particles_df['Assigned_Halo_Mass'] = 0
+    
+    # Initialize the metric column
+    if assignment == "most-massive":
+        particles_df["Assigned_Halo_Mass"] = 0.0
+    elif assignment == "least-massive":
+        particles_df["Assigned_Halo_Mass"] = np.inf
+    else: 
+        compute_potential = True
+        particles_df["Assigned_Halo_Mass"] = -np.inf
+    
+    #particles_df['Assigned_Halo_Mass'] = 0
     for col in particles_df.columns:
         particles_df[col] = particles_df[col].astype(type_list[col])
+    
+    if assignment == "most-bound":
+        particles_df["Assigned_Halo_Mass"] = particles_df["Assigned_Halo_Mass"].astype(type_list["Assigned_Halo_Vel"])
+
+    print(assignment, compute_potential)
+
 
     mass_scale = type_list["mass_scale"]
+    vel_scale =  type_list["velocity_scale"]
     for _, halo in merger_df.iterrows():
         halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
         halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
@@ -147,13 +176,30 @@ def assign_particle_positions(merger_df, particle_indices, particle_positions, p
         else:
             bound_mask = np.ones_like(local_indices, dtype=bool)
 
-        # Update particles if this halo is more massive than the one already assigned
-        current_mass = particles_df.loc[local_indices, 'Assigned_Halo_Mass']
-        update_mask = (halo['mass'] / mass_scale > current_mass) & bound_mask
+        # compute this halo’s metric for each local particle
+        if assignment == "most-massive":
+            metric = halo['mass'] / mass_scale
+        elif assignment == "least-massive":
+            metric = halo['mass'] / mass_scale
+        else:  # boundest
+            metric = (v_esc**2 - vel_mags**2 ) / vel_scale**2
+        metric_value = metric
+
+        # compare & update
+        current = particles_df.loc[local_indices, "Assigned_Halo_Mass"]
+        if assignment == "most-massive":
+            update_mask = (metric > current) & bound_mask
+        elif assignment == "least-massive":
+            update_mask = (metric < current) & bound_mask
+        else:  
+            update_mask = (metric > current) & bound_mask
+            metric_value = metric[update_mask]
+
         if np.any(update_mask):
             indices_to_update = np.array(local_indices)[update_mask]
             particles_df.loc[indices_to_update, 'Sub_tree_id'] = halo["Sub_tree_id"]
-            particles_df.loc[indices_to_update, 'Assigned_Halo_Mass'] = halo['mass'] / mass_scale
+            particles_df.loc[indices_to_update, 'Assigned_Halo_Mass'] = metric_value
+
 
     particles_df.drop(columns=['Assigned_Halo_Mass'], inplace=True)
     
@@ -162,7 +208,17 @@ def assign_particle_positions(merger_df, particle_indices, particle_positions, p
 
     return particles_df
     
-def _assign_halo(snap, particle_indexes, mergertree, ptype, file_list, compute_potential=True, verbose=False, type_list=None):  
+def _assign_halo(
+        snap, 
+        particle_indexes, 
+        mergertree, 
+        ptype, 
+        file_list, 
+        compute_potential, 
+        assignment,
+        verbose, 
+        type_list
+    ):  
     """Wrapper of assign_particle_positions for parallelization inside AccretionHistory class.
     """
     st = time()
@@ -195,6 +251,7 @@ def _assign_halo(snap, particle_indexes, mergertree, ptype, file_list, compute_p
         particle_positions,
         particle_velocities,
         compute_potential=compute_potential,
+        assignment=assignment,
         type_list=type_list
     )
     ft2 = time()
@@ -254,7 +311,10 @@ class AccretionHistory:
         self._type_list["Assigned_Halo_Mass"], self._type_list["mass_scale"] = _goofy_mass_scaling(self.mergertree.CompleteTree["mass"].max(), self.mergertree.CompleteTree["mass"].min())
         self._type_list["Time"] = np.float32
 
-        
+        vesc_approx = np.sqrt( 2 * 4.3E-6 * self.mergertree.CompleteTree["mass"])
+        self._type_list["Assigned_Halo_Vel"], self._type_list["velocity_scale"] = _goofy_mass_scaling(vesc_approx.max(), vesc_approx.min())
+
+
         
         self._prefix = os.path.commonprefix([os.path.basename(file) for file in self.equiv["snapname"].values])
         self._files = [pdir + "/" + file for file in self.equiv["snapname"].values]
@@ -520,7 +580,8 @@ class AccretionHistory:
         verbose = kwargs.get("verbose", False)
         trajectories = kwargs.get("trajectories", False)
         trajectory_mode = kwargs.get("trajectory_mode", None)
-
+        assignment = kwargs.get("assignment_mode", "most-bound")
+        
         if trajectories: 
             snapshot_list = np.unique(np.clip(
                 self.mergertree.equivalence_table["snapshot"].values.astype(int),
@@ -539,6 +600,7 @@ class AccretionHistory:
                     self._ptype,
                     self._files,
                     compute_potential=compute_potential,
+                    assignment=assignment,
                     verbose=verbose,
                     type_list=self._type_list
                 )
@@ -567,6 +629,7 @@ class AccretionHistory:
                     self._ptype,
                     self._files,
                     compute_potential,
+                    assignment,
                     verbose,
                     self._type_list
                 ))
