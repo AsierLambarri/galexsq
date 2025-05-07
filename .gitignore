@@ -7,6 +7,7 @@
 !/find_orbits.py
 !/AGORAComparison.py
 !/AGORAComparison.yaml
+!/requirements.txt
 
 # Folder to not ignore
 !/galexquared
