@@ -8,6 +8,7 @@ from unyt import unyt_array, unyt_quantity
 
 from copy import deepcopy
 
+from .data_container import DataContainer
 from .class_methods import load_ftable
 from .config import config
 
@@ -78,26 +79,19 @@ class MergerTree:
         return self._CompleteTree
     @property
     def MainTree(self):
-        if hasattr(self, "principal_subid"):
-            return self._CompleteTree[self._CompleteTree["TreeNum"] == 0]
-        else:
-            return self._MainTree
+        return self._MainTree
     @property
     def SatelliteTrees(self):
-        if hasattr(self, "principal_subid"):
-            return self._CompleteTree[self._CompleteTree["TreeNum"] != 0]
-        else:
-            return None    
+        return self._SatelliteTrees
     @property
     def PrincipalLeaf(self):
-        if hasattr(self, "principal_subid"):
-            return self._MainTree[self._MainTree["Sub_tree_id"] == self.principal_subid]
-        else:
-            return None
+        return self._PrincipalLeaf
     @property
     def equivalence_table(self):
         return self._equiv
-
+    @property
+    def ds(self):
+        return self._ds
     
     def __repr__(self):
         if hasattr(self, "_CompleteTree"): return repr(self._CompleteTree)
@@ -202,36 +196,10 @@ class MergerTree:
         """Computes R/Rvir for given nodes in in the tree.
         """
         df = deepcopy(old_df)
-        minn, maxx = self.PrincipalLeaf["Snapshot"].min(), self.PrincipalLeaf["Snapshot"].max()
-        
+
         df['R/Rvir'] = pd.Series()
         df['Rhost'] = pd.Series()
-        for snapnum in tqdm(
-            range(minn.astype(int), maxx.astype(int) + 1),
-            desc="Computing R/Rvir", ncols=200
-        ):
-            # get the one host for this snapshot
-        #    host = (
-        #        self.PrincipalLeaf
-        #        .loc[self.PrincipalLeaf['Snapshot']==snapnum]
-        #        .iloc[0]
-        #    )
-        #    cx, cy, cz = host.position_x, host.position_y, host.position_z
-        #    cRvir       = host.virial_radius
-        # 
-        #    # select all rows in df at this snapshot
-        #    mask = df['Snapshot'] == snapnum
-        #    df_x = df.loc[mask, 'position_x']
-        #    df_y = df.loc[mask, 'position_y']
-        #    df_z = df.loc[mask, 'position_z']
-        
-        #    # compute distance once
-        #    delta = np.sqrt((df_x - cx)**2 + (df_y - cy)**2 + (df_z - cz)**2)
-        
-        #    # assign both columns
-        #    df.loc[mask, 'Rhost']  = delta
-        #    df.loc[mask, 'R/Rvir'] = delta / cRvir
-            
+        for snapnum in tqdm(range(self.snap_min, self.snap_max + 1), desc="Computing R/Rvir", ncols=200):
             cx = self.PrincipalLeaf[self.PrincipalLeaf['Snapshot'] == snapnum]['position_x'].values
             cy = self.PrincipalLeaf[self.PrincipalLeaf['Snapshot'] == snapnum]['position_y'].values
             cz = self.PrincipalLeaf[self.PrincipalLeaf['Snapshot'] == snapnum]['position_z'].values
@@ -278,9 +246,9 @@ class MergerTree:
 
         self.principal_subid, tree_num = self.CompleteTree.sort_values(['mass', 'Snapshot'], ascending = (False, True))[["Sub_tree_id", "TreeNum"]].values[0]
         
-        #self._PrincipalLeaf = self.CompleteTree[self.CompleteTree["Sub_tree_id"] == self.principal_subid]
-        #self._MainTree = self.CompleteTree[self.CompleteTree["TreeNum"] == tree_num]
-        #self._SatelliteTrees = self.CompleteTree[self.CompleteTree["TreeNum"] != tree_num]
+        self._PrincipalLeaf = self.CompleteTree[self.CompleteTree["Sub_tree_id"] == self.principal_subid]
+        self._MainTree = self.CompleteTree[self.CompleteTree["TreeNum"] == tree_num]
+        self._SatelliteTrees = self.CompleteTree[self.CompleteTree["TreeNum"] != tree_num]
         
         self.size = len(self.CompleteTree)
 
@@ -352,7 +320,7 @@ class MergerTree:
             assert len(sids) == 1, "More than one halo found for the main tree, at z=0!! So Strange!!"
             
             self.principal_subid = int(sids[0])
-            #self._PrincipalLeaf = single_tree_final[single_tree_final['Sub_tree_id'] == self.principal_subid]
+            self._PrincipalLeaf = single_tree_final[single_tree_final['Sub_tree_id'] == self.principal_subid]
             
         single_tree_final['Halo_at_z0'] = mytree.uid * np.ones_like(single_tree_final['Halo_ID'].values)
         single_tree_final['TreeNum'] =  int(treenum) * np.ones_like(single_tree_final['Halo_ID'].values)
@@ -375,9 +343,9 @@ class MergerTree:
             
         self._computing_forest = True
         
-        self._MainTree = self.construc_df_tree(0, maingal=True) 
-        self._MainTree = self._compute_R_Rvir(self._MainTree)
-        self._MainTree = self._compute_Mpeak(self._MainTree)
+        MainTree = self.construc_df_tree(0, maingal=True) 
+        MainTree = self._compute_R_Rvir(MainTree)
+        MainTree = self._compute_Mpeak(MainTree)
 
         z0_masses = np.array([tree['mass'].to(self.selected_fields['mass'][1]).value/self.min_halo_mass - 1 for tree in self.arbor[1:]])
         index_above = np.where((z0_masses > 0) == False)[0][0] + 1
@@ -887,6 +855,30 @@ class MergerTree:
         return halo_params
 
         
+    def load_halo(self, sub_tree, redshift=None, snapshot=None, particle_ids=None, gas_ids=None):
+        """Loads a halo identified by its sub_tree ID using the Halo class. A given redshift or snapshot number can be
+        suplied to load the halo at a single redshift, or load all of its snapshots.
+        """
+        halo = self.get_halo_params(sub_tree, redshift=redshift, snapshot=snapshot)
+                    
+        self.ad = self.ds.all_data()
+        self.sp = self.ds.sphere(halo["center"], halo["rvir"])
+
+        if particle_ids is not None:
+            stars = DataContainer(self.ad, "stars", particle_ids=particle_ids)
+            dm = DataContainer(self.ad, "darkmatter", particle_ids=particle_ids)
+        else:
+            stars = DataContainer(self.sp, "stars")
+            dm = DataContainer(self.sp, "darkmatter")            
+
+            
+        if gas_ids is not None:
+            gas = DataContainer(self.sp, "gas")
+        else:
+            gas = DataContainer(self.sp, "gas")
+            
+        return [stars, dm, gas]
+
     
 
 
