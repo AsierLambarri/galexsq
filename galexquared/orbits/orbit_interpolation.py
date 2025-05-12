@@ -20,6 +20,7 @@ from ..class_methods import load_ftable
 from .oorbit import CartesianOrbit
 from .particle_potential import ParticlePotential
 from .phase_instant import PhaseSpaceInstant
+from .scf_potential import compute_and_filter_scf
 
 from copy import copy
 
@@ -78,8 +79,7 @@ class Orbis:
             self._files = [pdir + "/" + file for file in self._equiv["snapname"].values]
             self.ts = yt.DatasetSeries(self._files)
             if pot_mode.lower() == "scf":
-                self._coeffs = []
-                self.models = np.empty(self._equiv["snapname"].shape, dtype=object)
+                pass
             else:
                 self._octrees = np.empty(self._equiv["snapname"].shape, dtype=object)
             
@@ -212,12 +212,33 @@ class Orbis:
         return self._snap_to_index(self._host.loc[closest_index]["Snapshot"].astype(int))
     
     
-    def _prefabricate_particlePotenial(self, indices):
+    def _prefabricate_potential(self, indices):
         """Constructs, in parallel, as many trees as needed for the interpolation.
         """
         if self.mode == "scf":
-            pass
-        
+            for index in indices:
+                if self._potentials[index] == None:
+                    rvir_factor = self.rvir_factor
+                    sn = self._equiv.loc[index]["snapshot"]
+                    halopars = self._get_host_params(snapshot=sn)
+                    ds = self.ts[index]
+                    sp = ds.sphere(halopars["center"], rvir_factor * halopars["rvir"])
+                    pool = mp.Pool(mp.cpu_count() - 2)
+                    self._potentials[index] = compute_and_filter_scf(
+                        (sp["nbody", "particle_position"] - sp.center).to(self.units.decompose(1 * u.kpc).unit.to_string()),       #position
+                        sp["nbody", "particle_mass"].to(self.units.decompose(1 * u.Msun).unit.to_string()),                        #mass
+                        10,                                                                                                        #nmax
+                        4,                                                                                                         #lmax
+                        halopars["rs"].to(self.units.decompose(1 * u.kpc).unit.to_string(),                                        #scale_radius for scf=nfw_rs
+                        threshold=3,                                                                                               #snr threshold
+                        pool=pool,                                                                                                 #pool
+                        units=self.units                                                                                           #units
+                    )
+                    pool.join()
+                    pool.close()
+                    del pool
+
+                    
         elif self.mode == "nbody":
             for index in indices:
                 if self._potentials[index] == None:
@@ -320,7 +341,7 @@ class Orbis:
             else:
                 indexes = [self._find_index(t, prefer="nearest")]
 
-        self._prefabricate_particlePotenial(indexes)
+        self._prefabricate_potential(indexes)
 
         
     def interpolate_consecutive(self, ics, fcs, **kwargs):
@@ -344,7 +365,7 @@ class Orbis:
 
         self._clean_pot(save_index=index_ics)
 
-        self._prefabricate_particlePotenial([index_ics, index_fcs])
+        self._prefabricate_potential([index_ics, index_fcs])
 
         if verbose:
             print("\n")
@@ -391,7 +412,7 @@ class Orbis:
         for i in tqdm(range(imax - 1), desc="Interpolating over snapshot pairs..."):
             self.interpolate_consecutive(ics_list[i], ics_list[i+1], single=False, **kwargs)
 
-            if psutil.virtual_memory().percent > 65:
+            if psutil.virtual_memory().percent > 85:
                 self.clean_potentials()
                 self._clean_fwo()
 
@@ -482,7 +503,7 @@ class Orbis:
 
             
 
-    #def _prefabricate_particlePotenial_v2(self, index):
+    #def _prefabricate_potential_v2(self, index):
     #    """Constructs, in parallel, as many trees as needed for the interpolation.
     #    """
     #    sn = self._equiv.loc[index]["snapshot"]
@@ -516,4 +537,4 @@ class Orbis:
     #def _construct_particlePotential(self, indices):
     #    from pathos.multiprocessing import ProcessPool
     #    with ProcessPool(nodes=14) as pool:
-    #        pool.map(self._prefabricate_particlePotenial_v2, indices)   
+    #        pool.map(self._prefabricate_potential_v2, indices)   

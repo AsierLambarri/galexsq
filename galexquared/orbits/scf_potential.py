@@ -3,8 +3,21 @@ from gala.potentials.scf import compute_coeffs_discrete, SCFPotential
 import multiprocessing as mp
 
 
-def compute_and_filter_scf(xyz, mass, nmax, lmax, r_s, threshold,
-                           compute_var=True, **kwargs):
+def compute_and_filter_scf(
+            xyz,
+            mass,
+            nmax,
+            lmax,
+            r_s,
+            skip_odd=False,
+            skip_even=False,
+            skip_m=False,
+            compute_var=False,
+            threshold=3,
+            pool=None,
+            units=None,
+            **kwargs
+    ):
     """
     Compute SCF coefficients (S, T) and covariance matrix, then
     zero out all modes with S/N <= threshold (using only S to
@@ -38,70 +51,33 @@ def compute_and_filter_scf(xyz, mass, nmax, lmax, r_s, threshold,
         The full covariance matrix for (S,T) if compute_var is True,
         else None.
     """
-    # 1) Compute coefficients and covariance
     if compute_var:
         S, T, Cov = compute_coeffs_discrete(
             xyz, mass, nmax=nmax, lmax=lmax, r_s=r_s,
-            compute_var=True, **kwargs
+            compute_var=True, pool=pool, skip_odd=False, 
+            skip_even=False, skip_m=False, **kwargs
         )
     else:
         S, T = compute_coeffs_discrete(
             xyz, mass, nmax=nmax, lmax=lmax, r_s=r_s,
-            compute_var=False, **kwargs
+            compute_var=False, pool=pool, skip_odd=False, 
+            skip_even=False, skip_m=False, **kwargs
         )
         Cov = None
 
-    # 2) Extract variance of S-coeffs: Cov[0:S.size,0:S.size] diag
     if Cov is not None:
-        var_S = np.diag(Cov)[: S.size].reshape(S.shape)
-        sigma_S = np.sqrt(var_S)
+        snr = np.sqrt(S**2 / (Cov[0, 0] + 1E-5))
     else:
-        # If no covariance, assume infinite S/N → keep all
-        sigma_S = np.ones_like(S)
+        snr = 3 * threshold * np.ones_like(S)
 
-    # 3) Build S/N mask
-    snr = np.abs(S) / sigma_S
     mask = snr > threshold
 
-    # 4) Zero-out below-threshold modes
     S_filtered = np.where(mask, S, 0.0)
     T_filtered = np.where(mask, T, 0.0)
 
-    return S_filtered, T_filtered, Cov
+    return SCFPotential(Snlm=S_filtered, Tnlm=T_filtered, m=mass, r_s=r_s, units=units)
 
 
 
 
 
-class scfPotential:
-    """Wrapper fort the SCFPotential contained in Gala. This class takes the same arguments as gala's version and 
-    returns a minimal SCF representation, filtering out expansions with small S/N.
-    """
-    
-    def __init__(
-            self,
-            xyz,
-            mass,
-            nmax,
-            lmax,
-            r_s,
-            skip_odd=False,
-            skip_even=False,
-            skip_m=False,
-            compute_var=False,
-            pool=None
-            ):
-        
-        self.S, self.T, self.cov = compute_and_filter_scf(
-            xyz,
-            mass,
-            nmax,
-            lmax,
-            r_s,
-            skip_odd,
-            skip_even,
-            skip_m,
-            compute_var,
-            pool
-        )
-        self.potential = SCFPotential(Snlm=S, Tnlm=T, m=M, r_s=r_s)
