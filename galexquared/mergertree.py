@@ -7,6 +7,7 @@ from tqdm import tqdm
 from unyt import unyt_array, unyt_quantity
 
 from copy import deepcopy
+from multiprocessing import Pool
 
 from .class_methods import load_ftable
 from .config import config
@@ -90,10 +91,10 @@ class MergerTree:
             return None    
     @property
     def PrincipalLeaf(self):
-        if hasattr(self, "principal_subid"):
+        if hasattr(self, "principal_subid") & hasattr(self, "_MainTree"):
             return self._MainTree[self._MainTree["Sub_tree_id"] == self.principal_subid]
         else:
-            return None
+            return self._CompleteTree[self._CompleteTree["Sub_tree_id"] == self.principal_subid]
     @property
     def equivalence_table(self):
         return self._equiv
@@ -302,7 +303,7 @@ class MergerTree:
             raise AttributeError("Could not set equivalence table!")
 
         
-    def construc_df_tree(self, treenum, maingal = False):
+    def construc_df_tree(self, treenum, maingal=False):
         """Constructs merger-tree for a single tree.
 
         OPTIONAL parameters
@@ -366,38 +367,61 @@ class MergerTree:
         return single_tree_final        
 
 
-    def construct_df_forest(self):
+    def construct_df_forest(self, **kwargs):
         """Constructs a data-frame based merger-tree forest for easy access
         """
         if hasattr(self, "_tree_loaded"):
             warnings.warn("What you provided in initialization was an already constructed tree!")
             return None
-            
+        nproc = kwargs.get("parallel", 1)
+        
         self._computing_forest = True
         
         self._MainTree = self.construc_df_tree(0, maingal=True) 
         self._MainTree = self._compute_R_Rvir(self._MainTree)
         self._MainTree = self._compute_Mpeak(self._MainTree)
 
-        z0_masses = np.array([tree['mass'].to(self.selected_fields['mass'][1]).value/self.min_halo_mass - 1 for tree in self.arbor[1:]])
+        z0_masses = np.array([
+            tree['mass'].to(self.selected_fields['mass'][1]).value/self.min_halo_mass - 1 
+            for tree in self.arbor[1:]
+        ])
         index_above = np.where((z0_masses > 0) == False)[0][0] + 1
 
-        SatelliteTrees_final = pd.DataFrame()
-        for sat_index in tqdm(range(1, index_above), desc="Traversing Satellite Trees", ncols=200):
-            SatTree = self.construc_df_tree(sat_index, maingal=False)
-            SatelliteTrees_final = pd.concat([SatelliteTrees_final, SatTree])
+        sat_indices = list(range(1, index_above))
 
-        SatelliteTrees_final = self._compute_R_Rvir(SatelliteTrees_final.reset_index(drop=True, inplace=False))
+        sat_dfs = []
+        if nproc > 1:
+            with Pool(nproc) as pool:
+                for df in tqdm(pool.imap(self.construc_df_tree, sat_indices),
+                               total=len(sat_indices),
+                               desc="Traversing Satellite Trees",
+                               ncols=150):
+                    sat_dfs.append(df)
+        elif nproc == 1:
+            for sat_index in tqdm(sat_indices, desc="Traversing Satellite Trees", ncols=150):
+                SatTree = self.construc_df_tree(sat_index, maingal=False)
+                sat_dfs.append(SatTree)
+
+                
+        # Concatenate and post-process satellite trees
+        SatelliteTrees_final = pd.concat(sat_dfs, ignore_index=True).reset_index(drop=True, inplace=False)
+
+
+        SatelliteTrees_final = self._compute_R_Rvir(SatelliteTrees_final)
         SatelliteTrees_final = self._compute_Mpeak(SatelliteTrees_final)
 
         # self._MainTree = MainTree
         # self._SatelliteTrees = SatelliteTrees_final
-        CompleteTree = pd.concat([MainTree, SatelliteTrees_final])
+        CompleteTree = pd.concat([self._MainTree, SatelliteTrees_final])
         CompleteTree = self._compute_host_subtree(CompleteTree)
         self.set_trees(CompleteTree)
-
         self._computing_forest = False
 
+        del self._MainTree
+        del SatelliteTrees_final
+        del sat_dfs
+        del CompleteTree
+        
         return None
 
 
