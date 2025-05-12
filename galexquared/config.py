@@ -4,7 +4,6 @@ from pathlib import Path
 from unyt import unyt_quantity
 import warnings
 
-from .loaders import ARTI_loader, GEAR_loader, light_ARTI_loader, light_GEAR_loader
 
 class Config:
     """Config class that provides configuration options for pkg. Here one can set the loader, units, conversion tables
