@@ -9,188 +9,19 @@ from unyt import unyt_quantity, unyt_array
 
 import astropy.units as u
 
-import gala.dynamics as gd
 import gala.integrate as gi
 import gala.potential as gp
 from gala.units import UnitSystem
 
-from pytreegrav import PotentialTarget, AccelTarget, Potential, ConstructTree
 
 from ..class_methods import load_ftable
-from ..mergertree import MergerTree
-from ..config import config
-
-from copy import copy, deepcopy
-
-class ParticlePotential(gp.PotentialBase):
-    m = gp.PotentialParameter("mass", physical_type="mass")
-    pos = gp.PotentialParameter("pos", physical_type="length")
-    soft = gp.PotentialParameter("soft", physical_type="length")
-    ndim = 3
-        
-    def _compute_tree_ifnone(self):
-        if not hasattr(self, "tree"):
-            self.tree = ConstructTree(
-                pos=self.parameters["pos"].value,
-                m=self.parameters["m"].value,
-                softening=self.parameters["soft"].value,
-                quadrupole=True
-            )
-        else:
-            if self.tree is None:
-                self.tree = ConstructTree(
-                    pos=self.parameters["pos"].value,
-                    m=self.parameters["m"].value,
-                    softening=self.parameters["soft"].value,
-                    quadrupole=True
-                )
-
-    def _set_tree(self, tree):
-        self.tree = tree
-                
-    def _energy(self, q, t=0):
-        self._compute_tree_ifnone()
-        pot = PotentialTarget(
-            pos_target=q, 
-            pos_source=self.parameters["pos"].value, 
-            m_source=self.parameters["m"].value,
-            softening_source=self.parameters["soft"].value,
-            G=self.units.get_constant("G"),
-            parallel=False,
-            quadrupole=True,
-            tree=self.tree
-        ) 
-        return pot
-
-    def _acceleration(self, q, t=0):
-        self._compute_tree_ifnone()
-        accel = AccelTarget(
-            pos_target=q, 
-            pos_source=self.parameters["pos"].value, 
-            m_source=self.parameters["m"].value,
-            softening_source=self.parameters["soft"].value,
-            G=self.units.get_constant("G"),
-            parallel=False,
-            quadrupole=True,
-            tree=self.tree
-        ) 
-        return accel
-
-    def _gradient(self, q, t=0):
-        self._compute_tree_ifnone()
-        accel = AccelTarget(
-            pos_target=q, 
-            pos_source=self.parameters["pos"].value, 
-            m_source=self.parameters["m"].value,
-            softening_source=self.parameters["soft"].value,
-            G=self.units.get_constant("G"),
-            parallel=False,
-            quadrupole=True,
-            tree=self.tree
-        ) 
-        return -1 * accel
 
 
+from .oorbit import CartesianOrbit
+from .particle_potential import ParticlePotential
+from .phase_instant import PhaseSpaceInstant
 
-
-class PhaseSpaceInstant:
-    """Class to store Phase Space position and Time Stamp. It uses gala.dynamics.PhaseSpacePosition.
-    """
-    def __init__(
-        self, 
-        pos, 
-        vel, 
-        time, 
-        redshift=None, 
-        snapshot=None,
-        units=None
-    ):
-        self.units = UnitSystem(units) if type(units) == list else units
-        self.pos = self.units.decompose(pos)
-        self.vel = self.units.decompose(vel)
-        self.time = self.units.decompose(time)
-        self.redshift = redshift
-        self.snapshot = snapshot
-        assert (time is not None) or (redshift is not None), "You must provide either time or redshift!"
-        
-        self.PhaseSpacePos =  gd.PhaseSpacePosition(
-            pos=self.pos,
-            vel=self.vel
-        )
-
-    def change_units(self, new_system):
-        """Changes the units
-        """
-        new_units = UnitSystem(new_system) if type(new_system) == list else new_system
-        return PhaseSpaceInstant(
-            self.pos, 
-            self.vel, 
-            self.time, 
-            redshift=self.redshift, 
-            snapshot=self.snapshot, 
-            units=new_system
-        )
-
-    def to_gala(self):
-        """Changes to gala PhaseSpacePosition class
-        """
-        return gd.PhaseSpacePosition(
-            pos=self.pos,
-            vel=self.vel
-        )
-
-
-class CartesianOrbit:
-    """Interpolated orbit containing phase space position, time and absolute magnitudes of xyz and vxyz in cartesian coordinates.
-    """
-    def __init__(
-        self,
-        xyz,
-        vxyz,
-        t,
-        units=None
-    ):
-        self.units = UnitSystem(units) if type(units) == list else units
-
-        self.t =  self.units.decompose(t)
-        self.xyz =  self.units.decompose(xyz)
-        self.vxyz =  self.units.decompose(vxyz)
-        self.r = np.linalg.norm(self.xyz, axis=1)
-        self.v = np.linalg.norm(self.vxyz, axis=1)
-
-    def __add__(self, other):
-        if not isinstance(other, CartesianOrbit):
-            return NotImplemented
-
-        t_all = np.concatenate((self.t, other.t))
-        xyz_all = np.concatenate((self.xyz.T, other.xyz.T)).T
-        vxyz_all = np.concatenate((self.vxyz.T, other.vxyz.T)).T
-
-        sort_idx = np.argsort(t_all)
-        t_sorted = t_all[sort_idx]
-        xyz_sorted = xyz_all[:, sort_idx]
-        vxyz_sorted = vxyz_all[:, sort_idx]
-
-        unique_t, unique_indices = np.unique(t_sorted, return_index=True)
-        unique_xyz = xyz_sorted[:, unique_indices]
-        unique_vxyz = vxyz_sorted[:,unique_indices]
-
-        return CartesianOrbit(
-            unique_xyz, 
-            unique_vxyz, 
-            unique_t, 
-            units=self.units
-        )
-    
-    def to_gala_orbit(self):
-        """Translates to gala.dynamics.orbit instance so that the different methods available can be used.
-        """
-        return gd.Orbit(
-            self.xyz,
-            self.vxyz,
-            self.t
-        )
-
+from copy import copy
 
 
 
@@ -221,10 +52,12 @@ class Orbis:
     """
     def __init__(
         self,
-        pot_from_sim=None,
+        *,
+        host_tree=None,
         file_table=None,
         pdir=None,
-        pot_from_decomp=None,
+        pot_mode="nbody",
+        
         pot_model_list=None,
         units=None,
         **kwargs
@@ -232,11 +65,11 @@ class Orbis:
         if not kwargs.get("logging", True):
             yt.utilities.logger.ytLogger.setLevel(40)
             
-        self._pot_from_sim = True if pot_from_sim is not None else False
-        self._pot_from_decomp = True if pot_from_decomp is not None else False
-    
-        if self._pot_from_sim:
-            self._host = pot_from_sim
+        self._host_tree = True if host_tree is not None else False
+        self._host = host_tree
+        self.mode = pot_mode.lower()
+        
+        if pot_mode.lower() in ["nbody", "scf"]:
             assert pdir is not None, "You need to provide a directory for the simulation outputs"
             self._pdir = pdir
             assert file_table is not None, "You need to provide a file table containing columns SNAPSHOT NUMBER  |  REDSHIFT  |  FILE NAME"
@@ -244,10 +77,17 @@ class Orbis:
             self._prefix = os.path.commonprefix([os.path.basename(file) for file in self._equiv["snapname"].values])
             self._files = [pdir + "/" + file for file in self._equiv["snapname"].values]
             self.ts = yt.DatasetSeries(self._files)
-            self._octrees = np.empty(self._equiv["snapname"].shape, dtype=object)
+            if pot_mode.lower() == "scf":
+                self._coeffs = []
+                self.models = np.empty(self._equiv["snapname"].shape, dtype=object)
+            else:
+                self._octrees = np.empty(self._equiv["snapname"].shape, dtype=object)
             
-        if self._pot_from_decomp:
-            self._host = pot_from_decomp
+        elif pot_mode.lower() in ["model"]:
+            self._model_list = pot_model_list
+            self.models = self._load_pot_models(pot_model_list)
+
+            
 
 
         self._potentials = np.empty(self._equiv["snapname"].shape, dtype=object)
@@ -289,7 +129,7 @@ class Orbis:
             raise AttributeError("Could not set equivalence table!")
 
 
-    def _load_pot_models(self):
+    def _load_pot_models(self, model_list):
         """Loads a list of potential models defined as the ones in pot_model_list.
         """
         return None
@@ -375,26 +215,33 @@ class Orbis:
     def _prefabricate_particlePotenial(self, indices):
         """Constructs, in parallel, as many trees as needed for the interpolation.
         """
-        for index in indices:
-            if self._potentials[index] == None:
-                rvir_factor = self.rvir_factor
-                sn = self._equiv.loc[index]["snapshot"]
-                halopars = self._get_host_params(snapshot=sn)
-                ds = self.ts[index]
-                sp = ds.sphere(halopars["center"], rvir_factor * halopars["rvir"])
-                self._potentials[index] = ParticlePotential(
-                    sp["nbody", "particle_mass"].to(self.units.decompose(1 * u.Msun).unit.to_string()),
-                    (sp["nbody", "particle_position"] - sp.center).to(self.units.decompose(1 * u.kpc).unit.to_string()),
-                    (unyt_quantity(0.08, 'kpc') * sp["nbody", "particle_ones"]).to(self.units.decompose(1 * u.kpc).unit.to_string()),
-                    units=self.units
-                )
-                self._potentials[index]._compute_tree_ifnone()
-
-                gc.collect()
-                del ds
-                del sp
-            else:
-                pass
+        if self.mode == "scf":
+            pass
+        
+        elif self.mode == "nbody":
+            for index in indices:
+                if self._potentials[index] == None:
+                    rvir_factor = self.rvir_factor
+                    sn = self._equiv.loc[index]["snapshot"]
+                    halopars = self._get_host_params(snapshot=sn)
+                    ds = self.ts[index]
+                    sp = ds.sphere(halopars["center"], rvir_factor * halopars["rvir"])
+                    self._potentials[index] = ParticlePotential(
+                        sp["nbody", "particle_mass"].to(self.units.decompose(1 * u.Msun).unit.to_string()),
+                        (sp["nbody", "particle_position"] - sp.center).to(self.units.decompose(1 * u.kpc).unit.to_string()),
+                        (unyt_quantity(0.08, 'kpc') * sp["nbody", "particle_ones"]).to(self.units.decompose(1 * u.kpc).unit.to_string()),
+                        units=self.units
+                    )
+                    self._potentials[index]._compute_tree_ifnone()
+    
+                    gc.collect()
+                    del ds
+                    del sp
+                else:
+                    pass
+                
+        else:
+            pass
         gc.collect()
 
 
