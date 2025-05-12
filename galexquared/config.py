@@ -68,9 +68,9 @@ class Config:
         """Sets the loader
         """
         if self.code == "ART":
-            self.loader = light_ARTI_loader
+            self.loader = yt.load #light_ARTI_loader
         elif self.code == "GEAR":
-            self.loader = light_GEAR_loader
+            self.loader = yt.load #light_GEAR_loader
         else:
             self.loader = yt.load
 

@@ -13,9 +13,9 @@ import gala.integrate as gi
 import gala.potential as gp
 from gala.units import UnitSystem
 
+import multiprocessing as mp
 
 from ..class_methods import load_ftable
-
 
 from .oorbit import CartesianOrbit
 from .particle_potential import ParticlePotential
@@ -223,20 +223,19 @@ class Orbis:
                     halopars = self._get_host_params(snapshot=sn)
                     ds = self.ts[index]
                     sp = ds.sphere(halopars["center"], rvir_factor * halopars["rvir"])
-                    pool = mp.Pool(mp.cpu_count() - 2)
-                    self._potentials[index] = compute_and_filter_scf(
-                        (sp["nbody", "particle_position"] - sp.center).to(self.units.decompose(1 * u.kpc).unit.to_string()),       #position
-                        sp["nbody", "particle_mass"].to(self.units.decompose(1 * u.Msun).unit.to_string()),                        #mass
-                        10,                                                                                                        #nmax
-                        4,                                                                                                         #lmax
-                        halopars["rs"].to(self.units.decompose(1 * u.kpc).unit.to_string(),                                        #scale_radius for scf=nfw_rs
-                        threshold=3,                                                                                               #snr threshold
-                        pool=pool,                                                                                                 #pool
-                        units=self.units                                                                                           #units
-                    )
-                    pool.join()
-                    pool.close()
+                    with mp.Pool(mp.cpu_count() - 2) as pool:
+                        self._potentials[index] = compute_and_filter_scf(
+                            (sp["nbody", "particle_position"] - sp.center).to(self.units.decompose(1 * u.kpc).unit.to_string()),       #position
+                            sp["nbody", "particle_mass"].to(self.units.decompose(1 * u.Msun).unit.to_string()),                        #mass
+                            10,                                                                                                        #nmax
+                            4,                                                                                                         #lmax
+                            halopars["rs"].to(self.units.decompose(1 * u.kpc).unit.to_string()),                                       #scale_radius for scf=nfw_rs
+                            threshold=3,                                                                                               #snr threshold
+                            pool=pool,                                                                                                 #pool
+                            units=self.units                                                                                           #units
+                        )
                     del pool
+
 
                     
         elif self.mode == "nbody":

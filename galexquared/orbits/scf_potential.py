@@ -1,5 +1,6 @@
-import numyp as np
-from gala.potentials.scf import compute_coeffs_discrete, SCFPotential
+import numpy as np
+from gala.potential.scf import compute_coeffs_discrete, SCFPotential
+
 import multiprocessing as mp
 
 

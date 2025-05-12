@@ -1,17 +1,15 @@
 from .mergertree import MergerTree
 
-#from .data_container import DataContainer
-
-
 from .orbits import *
 from .accretion import *
 from .tracking import *
 
 from .structure import *
-from .utils import particle_unbinding_fire, quickplot, refind_pericenters_apocenters
+from .utils import *
 from .config import config
 
 
+#from .data_container import DataContainer
 
 #from .orbit_interpolation import PhaseSpaceInstant, Orbis, GetICSList, CartesianOrbit
 
