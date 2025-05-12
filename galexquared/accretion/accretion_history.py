@@ -133,8 +133,6 @@ def assign_particle_positions(
     if assignment == "most-bound":
         particles_df["Assigned_Halo_Mass"] = particles_df["Assigned_Halo_Mass"].astype(type_list["Assigned_Halo_Vel"])
 
-    print(assignment, compute_potential)
-
 
     mass_scale = type_list["mass_scale"]
     vel_scale =  type_list["velocity_scale"]
