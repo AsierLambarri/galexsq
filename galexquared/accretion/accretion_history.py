@@ -1,14 +1,14 @@
 import yt
 import os
 import gc
-import sys
 import numpy as np
 import pandas as pd
+
+import numba
 
 from ..mergertree import MergerTree
 from ..config import config
 
-from copy import copy, deepcopy
 from tqdm import tqdm
 from time import time
 
@@ -64,13 +64,29 @@ def _nfw_potential(r, mvir, rs, c, G, soft):
     return -G * mvir * rs / A_nfw * np.log(1 + x) / x 
 
 
+
+
+@numba.njit(parallel=False)
+def _greedy_assign(particle_ix, halo_ix, dists, N):
+    order = np.argsort(dists)
+    assignment = -1 * np.ones(N, np.int32)
+    seen = np.zeros(N, np.uint8)
+    for k in range(order.shape[0]):
+        idx = order[k]
+        pi = particle_ix[idx]
+        if seen[pi] == 0:
+            assignment[pi] = halo_ix[idx]
+            seen[pi] = 1
+    return assignment
+
+
+
+
 def assign_particle_positions(
         merger_df, 
         particle_indices, 
         particle_positions, 
         particle_velocities, 
-        compute_potential=True, 
-        assignment="most-bound",                      
         type_list=None
     ):
     """Checks the position of the particles in one snapshot and finds to which halo they belong
@@ -93,10 +109,10 @@ def assign_particle_positions(
     """
     from scipy.spatial import KDTree
 
-    assert assignment in ("most-massive", "least-massive", "most-bound"), "assignment must be 'massive', 'lightest' or 'boundest'"
     assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
     redshift = merger_df["Redshift"].values[0]
 
+    regularization = 1E-6
     particle_tree = KDTree(particle_positions)
 
     if type_list is None:
@@ -109,102 +125,125 @@ def assign_particle_positions(
             "mass_scale": 1,
             "velocity_scale": 1
         }
-    particles_df = pd.DataFrame({
-        'particle_index': particle_indices,
-        'Time': merger_df["Time"].values[0] * np.ones_like(particle_indices, dtype=int),
-        'Snapshot': merger_df["Snapshot"].values[0] * np.ones_like(particle_indices, dtype=int),
 
-    })
-    particles_df['Sub_tree_id'] = -1
-    
-    # Initialize the metric column
-    if assignment == "most-massive":
-        particles_df["Assigned_Halo_Mass"] = 0.0
-    elif assignment == "least-massive":
-        particles_df["Assigned_Halo_Mass"] = np.inf
-    else: 
-        compute_potential = True
-        particles_df["Assigned_Halo_Mass"] = -np.inf
-    
-    #particles_df['Assigned_Halo_Mass'] = 0
-    for col in particles_df.columns:
-        particles_df[col] = particles_df[col].astype(type_list[col])
-    
-    if assignment == "most-bound":
-        particles_df["Assigned_Halo_Mass"] = particles_df["Assigned_Halo_Mass"].astype(type_list["Assigned_Halo_Vel"])
-
-
-    mass_scale = type_list["mass_scale"]
-    vel_scale =  type_list["velocity_scale"]
+    n = particle_indices.size
+    halo_vel_means  = []
+    halo_cov_invs   = []
+    candidate_list  = []
     for _, halo in merger_df.iterrows():
         halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
         halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
         halo_c = halo['virial_radius'] / halo['scale_radius']
 
-        local_indices = particle_tree.query_ball_point(halo_center, r=halo['virial_radius'])
-        if not local_indices:
+
+        local_indices = np.array(particle_tree.query_ball_point(halo_center, r=halo['virial_radius']))
+        if local_indices.size == 0:
+            halo_cov_invs.append(np.eye(3))
+            candidate_list.append(local_indices)
+            halo_vel_means.append(halo_vel)
             continue  
+
         
-        if compute_potential:
-            pos_subset = particle_positions[local_indices]     # in kpccm 
-            vel_subset = particle_velocities[local_indices]    # in km/s
-            rel_positions = pos_subset - halo_center
-            rel_velocities = vel_subset - halo_vel
-    
-            distances = np.linalg.norm(rel_positions, axis=1)  # in kpccm
-            vel_mags = np.linalg.norm(rel_velocities, axis=1)  # in km/s
-            
-            
-            denom = np.log(1 + halo_c) - halo_c / (1 + halo_c)
-            if denom == 0:
-                v_esc = np.ones_like(distances) * -1
-            else:
-                phi = _nfw_potential(
-                    distances / (1 + redshift),
-                    halo['mass'],
-                    halo['scale_radius'] / (1 + redshift),
-                    halo_c,
-                    4.3E-6,
-                    0.08
-                )
-                v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
-    
-            # Determine which particles are bound: relative velocity < escape velocity
-            bound_mask = vel_mags < v_esc
+        pos_subset = particle_positions[local_indices]     # in kpccm 
+        vel_subset = particle_velocities[local_indices]    # in km/s
+        rel_positions = pos_subset - halo_center
+        rel_velocities = vel_subset - halo_vel
+
+        distances = np.linalg.norm(rel_positions, axis=1)  # in kpccm
+        vel_mags = np.linalg.norm(rel_velocities, axis=1)  # in km/s
+        
+        
+        denom = np.log(1 + halo_c) - halo_c / (1 + halo_c)
+        if denom == 0:
+            v_esc = np.ones_like(distances) * -1
         else:
-            bound_mask = np.ones_like(local_indices, dtype=bool)
+            phi = _nfw_potential(
+                distances / (1 + redshift),
+                halo['mass'],
+                halo['scale_radius'] / (1 + redshift),
+                halo_c,
+                4.3E-6,
+                0.08
+            )
+            v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
 
-        # compute this halo’s metric for each local particle
-        if assignment == "most-massive":
-            metric = halo['mass'] / mass_scale
-        elif assignment == "least-massive":
-            metric = halo['mass'] / mass_scale
-        else:  # boundest
-            metric = (v_esc**2 - vel_mags**2 ) / vel_scale**2
-        metric_value = metric
+        bound_mask = vel_mags < v_esc
+        
+        valid_indices = local_indices[bound_mask]
+        candidate_list.append(valid_indices)
 
-        # compare & update
-        current = particles_df.loc[local_indices, "Assigned_Halo_Mass"]
-        if assignment == "most-massive":
-            update_mask = (metric > current) & bound_mask
-        elif assignment == "least-massive":
-            update_mask = (metric < current) & bound_mask
-        else:  
-            update_mask = (metric > current) & bound_mask
-            metric_value = metric[update_mask]
+        if valid_indices.size > 0:
+            vals = particle_velocities[valid_indices]
+            cov = np.cov(vals, rowvar=False) + regularization * np.eye(3)
+            cov_inv = np.linalg.inv(cov)
+        else:
+            cov_inv = np.eye(3)
 
-        if np.any(update_mask):
-            indices_to_update = np.array(local_indices)[update_mask]
-            particles_df.loc[indices_to_update, 'Sub_tree_id'] = halo["Sub_tree_id"]
-            particles_df.loc[indices_to_update, 'Assigned_Halo_Mass'] = metric_value
+        halo_cov_invs.append(cov_inv)
+        halo_vel_means.append(halo_vel)
 
-
-    particles_df.drop(columns=['Assigned_Halo_Mass'], inplace=True)
-    
     del particle_tree
-    gc.collect()
+    
 
+    rows = []
+    cols = []
+    dists = []
+    
+    for j, valid in enumerate(candidate_list):
+        mu   = halo_vel_means[j]    
+        inv  = halo_cov_invs[j]     
+        idxs = np.array(valid, dtype=int)
+        if idxs.size == 0:
+            continue
+    
+        vels = particle_velocities[idxs]       
+        dv   = vels - mu[None,:]               
+    
+        D2 = np.einsum('ij,ij->i', dv.dot(inv), dv)  
+    
+        rows.extend(idxs)       
+        cols.extend([j]*idxs.size)        
+        dists.extend(D2) 
+
+
+    if rows:
+        part_ix = np.array(rows, np.int32)
+        halo_ix = np.array(cols, np.int32)
+        dist_a  = np.array(dists, np.float64)
+        assign  = _greedy_assign(part_ix, halo_ix, dist_a, n)
+    else:
+        assign  = -np.ones(n, np.int32)
+
+    subtree = -np.ones(n, np.int32)
+    for i in range(n):
+        h = assign[i]
+        if h >= 0:
+            subtree[i] = merger_df["Sub_tree_id"].iat[h].astype(type_list["Sub_tree_id"])
+          
+            
+
+
+            
+    particles_df = pd.DataFrame({
+        'particle_index': particle_indices,
+        'Time': merger_df["Time"].values[0] * np.ones_like(particle_indices, dtype=int),
+        'Snapshot': merger_df["Snapshot"].values[0] * np.ones_like(particle_indices, dtype=int),
+    
+    })
+    
+    particles_df['Sub_tree_id'] = subtree
+    for col in particles_df.columns:
+        particles_df[col] = particles_df[col].astype(type_list[col])
+        
+    gc.collect()
     return particles_df
+
+
+
+
+
+
+
     
 def _assign_halo(
         snap, 
@@ -212,8 +251,6 @@ def _assign_halo(
         mergertree, 
         ptype, 
         file_list, 
-        compute_potential, 
-        assignment,
         verbose, 
         type_list
     ):  
@@ -248,8 +285,6 @@ def _assign_halo(
         particle_indices,
         particle_positions,
         particle_velocities,
-        compute_potential=compute_potential,
-        assignment=assignment,
         type_list=type_list
     )
     ft2 = time()
