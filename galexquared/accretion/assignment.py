@@ -11,6 +11,7 @@ from time import time
 from collections import defaultdict
 
 from ._helpers import _nfw_potential
+from ..tracking._helpers import best_dtype
 
 def _greedy_assign(rows, cols, dists, n_particles, Dmax):
     """Sparse, RAM‑friendly greedy assignment of particles → halos. Returns a dictionary
@@ -31,7 +32,7 @@ def _greedy_assign(rows, cols, dists, n_particles, Dmax):
 
     # 3) Unique rows -> best halos
     unique_rows, first_idx = np.unique(sorted_rows, return_index=True)
-    best_halos            = sorted_cols[first_idx]
+    best_halos             = sorted_cols[first_idx]
 
     unique_halos = np.unique(best_halos)
     halo_to_particles = {
@@ -68,12 +69,11 @@ def assign_particle_positions_bipartite(
     -------
     The subtree_id inside which the each particle is.
     """
-
+    time_stats = {}
     assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
     redshift = merger_df["Redshift"].values[0]
 
     regularization = 1E-6
-    particle_tree = KDTree(particle_positions)
 
     if type_list is None:
         type_list = {
@@ -86,16 +86,18 @@ def assign_particle_positions_bipartite(
             "velocity_scale": 1
         }
 
+
+    t1 = time()
+    particle_tree = KDTree(particle_positions)
+    t2 = time()
+    
     n = particle_indices.size
     k = len(merger_df)
 
-    halo_vel_means = []
-    halo_cov_invs  = []
     rows = []
     cols = []
     dists = []
     
-    t = time()
     for j, (_, halo) in enumerate(merger_df.iterrows()):
         halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
         halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
@@ -103,8 +105,6 @@ def assign_particle_positions_bipartite(
 
         local_indices = np.array(particle_tree.query_ball_point(halo_center, r=halo['virial_radius']))
         if local_indices.size == 0:
-            halo_cov_invs.append(np.eye(3))
-            halo_vel_means.append(halo_vel)
             continue  
 
         pos_subset = particle_positions[local_indices]     # in kpccm 
@@ -140,8 +140,6 @@ def assign_particle_positions_bipartite(
         else:
             cov_inv = np.eye(3)
 
-        halo_cov_invs.append(cov_inv)
-        halo_vel_means.append(halo_vel)
 
         vels = particle_velocities[valid_indices]
         dv   = vels - halo_vel[None, :]
@@ -152,26 +150,24 @@ def assign_particle_positions_bipartite(
         dists.extend(D2.tolist())
 
     del particle_tree
-    t2 = time()
-    print(f"halo kdtree loop and sparse matrix: {t2 -t}")
-
-
     
     t3 = time()
-    rows  = np.array(rows, dtype=np.int32)
-    cols  = np.array(cols, dtype=np.int32)
-    dists = np.array(dists, dtype=np.float64)
+
+    rows  = np.array(rows, dtype=best_dtype(rows))
+    cols  = np.array(cols, dtype=best_dtype(cols))
+    dists = np.array(dists, dtype=best_dtype(dists, eps=1E-5))
 
     halo_to_particles = _greedy_assign(rows, cols, dists, n, Dmax**2)
-
+    del rows, cols, dists
+    
+    t4 = time()
+    
     subtree = -np.ones(n, dtype=np.int32)
     for h, plist in halo_to_particles.items():
         subtree[plist] = merger_df['Sub_tree_id'].iat[h].astype(type_list['Sub_tree_id'])
-    
-    t4 = time()
-    print(f"assignment {t4 - t3}")
+            
+    t5 = time()
 
-    
     particles_df = pd.DataFrame({
         'particle_index': particle_indices.astype(type_list["particle_index"]),
         'Time': merger_df["Time"].values[0] * np.ones_like(particle_indices, dtype=type_list["Time"]),
@@ -182,9 +178,18 @@ def assign_particle_positions_bipartite(
     for col in particles_df.columns:
         particles_df[col] = particles_df[col].astype(type_list[col])
 
-    del rows, cols, dists, halo_to_particles, subtree
+    del halo_to_particles, subtree
     gc.collect()
-    return particles_df
+    
+    t6 = time()
+    
+    time_stats["kdtree build"] = t2 - t1
+    time_stats["simultaneous halo loop & sparse bipartite tree build"] = t3 - t2
+    time_stats["greedy assignment"] = t4 - t3
+    time_stats["subtree unpacking"] = t5 - t4
+    time_stats["rest"] = t6 - t5
+    
+    return particles_df, time_stats
 
 
 
@@ -216,14 +221,17 @@ def assign_particle_positions(
     -------
     The subtree_id inside which the each particle is.
     """
-    from scipy.spatial import KDTree
-
+    time_stats = {}
     assert assignment in ("most-massive", "least-massive", "most-bound"), "assignment must be 'massive', 'lightest' or 'boundest'"
     assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
     redshift = merger_df["Redshift"].values[0]
 
+    t1 = time()
+    
     particle_tree = KDTree(particle_positions)
-
+    
+    t2 = time()
+    
     if type_list is None:
         type_list = {
             "particle_index": np.uint64,
@@ -243,7 +251,6 @@ def assign_particle_positions(
     })
     particles_df['Sub_tree_id'] = -1
     
-    # Initialize the metric column
     if assignment == "most-massive":
         particles_df["Assigned_Halo_Mass"] = 0.0
     elif assignment == "least-massive":
@@ -252,14 +259,14 @@ def assign_particle_positions(
         compute_potential = True
         particles_df["Assigned_Halo_Mass"] = -np.inf
     
-    #particles_df['Assigned_Halo_Mass'] = 0
     for col in particles_df.columns:
         particles_df[col] = particles_df[col].astype(type_list[col])
     
     if assignment == "most-bound":
         particles_df["Assigned_Halo_Mass"] = particles_df["Assigned_Halo_Mass"].astype(type_list["Assigned_Halo_Vel"])
 
-
+    t3 = time()
+    
     mass_scale = type_list["mass_scale"]
     vel_scale =  type_list["velocity_scale"]
     for _, halo in merger_df.iterrows():
@@ -295,17 +302,15 @@ def assign_particle_positions(
                 )
                 v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
     
-            # Determine which particles are bound: relative velocity < escape velocity
             bound_mask = vel_mags < v_esc
         else:
             bound_mask = np.ones_like(local_indices, dtype=bool)
 
-        # compute this halo’s metric for each local particle
         if assignment == "most-massive":
             metric = halo['mass'] / mass_scale
         elif assignment == "least-massive":
             metric = halo['mass'] / mass_scale
-        else:  # boundest
+        else:  
             metric = (v_esc**2 - vel_mags**2 ) / vel_scale**2
         metric_value = metric
 
@@ -324,29 +329,30 @@ def assign_particle_positions(
             particles_df.loc[indices_to_update, 'Sub_tree_id'] = halo["Sub_tree_id"]
             particles_df.loc[indices_to_update, 'Assigned_Halo_Mass'] = metric_value
 
-
+    t4 = time()
     particles_df.drop(columns=['Assigned_Halo_Mass'], inplace=True)
     
     del particle_tree
     gc.collect()
 
-    return particles_df
+    time_stats["kdtree build"] = t2 - t1
+    time_stats["halo loop"] = t4 - t3
+    time_stats["rest"] = t3 - t2
+
+    return particles_df, time_stats
 
 
 
 
     
 
-
-
-    
 def _assign_halo(
         snap, 
         particle_indexes, 
         mergertree, 
         ptype, 
         file_list, 
-        mode="bipartite",
+        mode,
         **kwargs
     ):  
     """Wrapper of assign_particle_positions for parallelization inside AccretionHistory class.
@@ -354,7 +360,7 @@ def _assign_halo(
     type_list = kwargs.get("type_list", None)
     verbose = kwargs.get("verbose", False)
     compute_potential = kwargs.get("compute_potential", True)
-    assignment = kwargs.get("assignment", "most-bound")
+    assignment = kwargs.get("assignment_mode", "most-bound")
     Dmax = kwargs.get("Dmax", 100000)
     
     st = time()
@@ -377,6 +383,7 @@ def _assign_halo(
     particle_indices = ad["born_stars", "particle_index"].astype(int).value
     particle_positions = ad["born_stars", "particle_position"].to("kpccm").value
     particle_velocities = ad["born_stars", "particle_velocity"].to("km/s").value
+    N = int(len(particle_indices))
     ft = time()
     
     del ds, ad
@@ -384,7 +391,7 @@ def _assign_halo(
     
     st2 = time()
     if mode.lower() == "fast":
-        particle_snapshot_df = assign_particle_positions(
+        particle_snapshot_df, time_stats = assign_particle_positions(
             merger_df,
             particle_indices,
             particle_positions,
@@ -394,7 +401,7 @@ def _assign_halo(
             type_list=type_list
         )
     elif mode.lower() == "bipartite":
-        particle_snapshot_df = assign_particle_positions_bipartite(
+        particle_snapshot_df, time_stats = assign_particle_positions_bipartite(
             merger_df,
             particle_indices,
             particle_positions,
@@ -405,22 +412,29 @@ def _assign_halo(
     else:
         raise Exception(f"Mode follow accretion not valid. Must be 'fast' or 'bipartite'!")
     ft2 = time()
-    
+
+    del particle_indices, particle_positions, particle_velocities
     gc.collect()
 
     if verbose:
         print("")
-        print(f"SNAP:  {int(snap)}")
+        print(f"SNAPSHOT:  {int(snap)}")
         print("------------------")
-        print("")
-        print(f"- path: {file_list[fn]}")
-        print(f"- N: {int(len(particle_indices))}")
-        print(f"- load time: {ft - st}")
-        print(f"- process time: {ft2 - st2}")
+        print(f"-mode: {mode} - {assignment}")
+        print(f"-path: {file_list[fn]}")
+        print(f"-N: {N}")
+        print(f"-load time: {(ft - st):.4f}s")
+        print(f"-Processing Time: {np.array(list(time_stats.values())).sum():.4f}s")
+        print(f"----------------")
+        for key, val in time_stats.items():
+            print(f"  -{key}: {val:.4f}s")
+
+            
     return particle_snapshot_df
     
 def _assign_halo_wrapper(task):
-    return _assign_halo(*task)
+    args, kwargs = task
+    return _assign_halo(*args, **kwargs)
 
 
 

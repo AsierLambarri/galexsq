@@ -17,8 +17,6 @@ from ..config import config
 
 
 
-    
-
 class AccretionHistory:
     """Constructs the Accretion History of the selected Sub_tree. Follows arxiv:2410.09144.
     
@@ -296,7 +294,7 @@ class AccretionHistory:
         return self.snap_particle_dict
 
     
-    def create_accretion_history(self, subtree, ptype, z=None, t=None, indices=None, **kwargs):
+    def create_accretion_history(self, subtree, ptype, z=None, t=None, indices=None, mode="bipartite", **kwargs):
         """
         Creates Accretion History of the halo identified with subtree, starting from z/t and
         going backwards
@@ -318,12 +316,15 @@ class AccretionHistory:
         if kwargs.get("verbose", False):
             print(f"Number of particles selected: {self.particle_indexes.shape[0]}")
 
+        kwargs['type_list'] = self._type_list
+            
         nproc = int(kwargs.get("parallel", 1))
-        compute_potential = kwargs.get("compute_potential", True)
-        verbose = kwargs.get("verbose", False)
         trajectories = kwargs.get("trajectories", False)
         trajectory_mode = kwargs.get("trajectory_mode", None)
-        assignment = kwargs.get("assignment_mode", "most-bound")
+        verbose = kwargs.get("verbose", False)
+        
+        #compute_potential = kwargs.get("compute_potential", True)
+        #assignment = kwargs.get("assignment_mode", "most-bound")
         
         if trajectories: 
             snapshot_list = np.unique(np.clip(
@@ -342,10 +343,12 @@ class AccretionHistory:
                     self.mergertree,
                     self._ptype,
                     self._files,
-                    compute_potential=compute_potential,
-                    assignment=assignment,
-                    verbose=verbose,
-                    type_list=self._type_list
+                    mode,
+                    **kwargs
+                    #compute_potential=compute_potential,
+                    #assignment=assignment,
+                    #verbose=verbose,
+                    #type_list=self._type_list
                 )
                 if trajectories and trajectory_mode in ["delta", "delta-filter"]:
                     self._snap_particles[snapshot] = self._delta_fitering(snapshot)
@@ -366,22 +369,24 @@ class AccretionHistory:
             for snapshot in snapshot_list:
                 particle_indexes = self.born_between(snapshot) if trajectories else self.snap_particle_dict[snapshot]
                 tasks.append((
-                    snapshot,
+                    (snapshot,
                     particle_indexes,
                     self.mergertree,
                     self._ptype,
                     self._files,
-                    compute_potential,
-                    assignment,
-                    verbose,
-                    self._type_list
+                    mode),
+                    kwargs
+                    #compute_potential,
+                    #assignment,
+                    #verbose,
+                    #self._type_list
                 ))
 
             chsize = kwargs.get("chunksize", len(tasks) // (4*nproc))
             for i, particle_df in enumerate(
                 tqdm(pool.imap(_assign_halo_wrapper, tasks, chunksize=chsize), total=len(tasks))
             ):
-                snapshot = tasks[i][0]
+                snapshot = tasks[i][0][0]
                 self._snap_particles[snapshot] = particle_df
 
                 if trajectories and trajectory_mode in ["delta", "delta-filter"]:
