@@ -1,0 +1,52 @@
+import numpy as np
+
+def _goofy_mass_scaling(max_mass, min_mass):
+    log_mass_max = np.log10(max_mass)
+    log_mass_min = np.log10(min_mass)
+    
+    scale_mass = 10**((log_mass_max + log_mass_min) / 2)
+    
+    normalized_max = max_mass / scale_mass
+    normalized_min = min_mass / scale_mass
+    
+    max_value = max(normalized_max, normalized_min)
+    
+    bits_required = np.ceil(np.log2(max_value))
+    
+    if bits_required <= 16:
+        dtype = np.float16
+    elif bits_required <= 32:
+        dtype = np.float32
+    else:
+        dtype = np.float64
+
+    return dtype, scale_mass
+
+    
+
+def _check_particle_uniqueness(data):
+    """Checks that particles are not born twice!
+    """
+    all_values = [value for sublist in data.values() for value in sublist]
+    unique_values = set(all_values)
+    
+    return len(all_values) == len(unique_values)
+
+def _remove_duplicates(data):
+    """Removes duplicates leaving first appearences in snapshot order.
+    """
+    seen = set()
+    new_data = {}
+    for key in sorted(data.keys()):
+        filtered_list = [x for x in data[key] if x not in seen and (seen.add(x) or True)]
+        new_data[key] = np.array(filtered_list)
+    return new_data
+
+def _nfw_potential(r, mvir, rs, c, G, soft):
+    x = np.clip(r, 2 * soft, np.inf) / rs
+    A_nfw = np.log(1 + c) - c / (1 + c)
+    return -G * mvir * rs / A_nfw * np.log(1 + x) / x 
+
+
+
+
