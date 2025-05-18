@@ -41,17 +41,17 @@ def numba_cov(X, rowvar=False):
         return _numba_cov_core(X)
 
 @jit(nopython=True)
-def numba_cov_inv(X, rowvar=False):
+def numba_cov_inv(X, rowvar=False, reg=1E-10):
     """
     Compute the inverse of the covariance matrix of X.
     Returns the inverse covariance matrix.
     """
     cov = numba_cov(X, rowvar)
-    return np.linalg.inv(cov)
+    return np.linalg.inv(cov + reg * np.eye(3))
 
 
 
-@jit(nopython=True, parallel=True)
+@jit(nopython=True, parallel=False)
 def numba_einsum_ijij_to_i(A, B):
     """
     Optimized for 'ij,ij->i' operations: computes a 1D array
@@ -62,7 +62,7 @@ def numba_einsum_ijij_to_i(A, B):
         raise ValueError("Input arrays must have the same shape for 'ij,ij->i'.")
     n, m = A.shape
     out = np.zeros(n)
-    for i in prange(n):
+    for i in range(n):
         s = 0.0
         for j in range(m):
             s += A[i, j] * B[i, j]
