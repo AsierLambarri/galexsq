@@ -11,6 +11,7 @@ from time import time
 from collections import defaultdict
 
 from ._helpers import _nfw_potential
+from ._numba_helpers import numba_cov, numba_cov_inv, numba_einsum_ijij_to_i
 from ..tracking._helpers import best_dtype
 
 def _greedy_assign(rows, cols, dists, n_particles, Dmax):
@@ -39,7 +40,7 @@ def _greedy_assign(rows, cols, dists, n_particles, Dmax):
         int(h): unique_rows[best_halos == h].tolist()
         for h in unique_halos
     }
-
+    gc.collect()
     return halo_to_particles
 
 
@@ -150,6 +151,7 @@ def assign_particle_positions_bipartite(
         dists.extend(D2.tolist())
 
     del particle_tree
+    gc.collect()
     
     t3 = time()
 

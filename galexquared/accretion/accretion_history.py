@@ -6,6 +6,7 @@ import numba
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from numba import set_num_threads
 
 from time import time
 import collections.abc
@@ -358,6 +359,8 @@ class AccretionHistory:
                     print(self._snap_particles[snapshot].head())
                     print("")
                     print("")
+                    
+                gc.collect()
 
         else:
             import multiprocessing as mp
@@ -397,6 +400,8 @@ class AccretionHistory:
                     print(self._snap_particles[snapshot].head())
                     print("")
                     print("")
+                    
+                gc.collect()
 
 
             
@@ -609,6 +614,8 @@ class AccretionHistory:
                 dset = f.create_dataset("data", data=structured_array)
         
                 dset.attrs["columns"] = np.array(df.columns.values, dtype=h5py.string_dtype(encoding='utf-8'))
+                dset.attrs["main_subtree"] = self.accretion_id 
+
         else:
             raise Exception("Non supported format")
 
@@ -626,6 +633,7 @@ class AccretionHistory:
                 columns = list(dset.attrs["columns"])
         
                 self.accreted_particles = pd.DataFrame.from_records(data, columns=columns)
+                self.accretion_id = dset.attrs["main_subtree"]
         else:
             raise Exception("Non supported format")
 
