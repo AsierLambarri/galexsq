@@ -84,7 +84,7 @@ def _build_triplets_3d3v(halo_means, halo_cov_invs, candidate_list, halo_scaling
 
         D2_pos = np.einsum("ij,ij->i", dx @ inv_pos, dx)
         D2_vel = np.einsum("ij,ij->i", dv @ inv_vel, dv)
-        D2 = D2_pos + D2_vel
+        D2 = 1 * (D2_pos + D2_vel)
 
         rows.extend(idxs.tolist())
         cols.extend([j] * idxs.size)

@@ -80,11 +80,11 @@ def _halo_loop_3v(
         valid_indices = local_indices[bound_mask]
         candidate_list.append(valid_indices)
         
-        if valid_indices.size < 100000:
+        if valid_indices.size < 10000 and valid_indices.size > 1:
             cov_inv = np.linalg.inv(
                 np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
             )
-        elif valid_indices.size > 100000:
+        elif valid_indices.size >= 10000:
             cov_inv = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
         else:
             cov_inv = np.eye(3)
@@ -163,9 +163,16 @@ def _halo_loop_3d3v(
         valid_indices = local_indices[bound_mask]
         candidate_list.append(valid_indices)
         
-        if valid_indices.size > 1:
+        if valid_indices.size >= 10000:
             cov_inv_x = numba_cov_inv(particle_positions[valid_indices] / pos_scale, reg=reg)
             cov_inv_y = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
+        elif valid_indices.size < 10000 and valid_indices.size > 1:
+            cov_inv_x = np.linalg.inv(
+                np.cov(particle_positions[valid_indices] / pos_scale, rowvar=False) + reg * np.eye(3)
+            )
+            cov_inv_y = np.linalg.inv(
+                np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
+            )
         else:
             cov_inv_x = np.eye(3)
             cov_inv_y = np.eye(3)
