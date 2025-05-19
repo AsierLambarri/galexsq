@@ -1,5 +1,17 @@
-from numba import jit, prange
+from numba.typed import List as NumbaList
+from numba import jit, prange, types
 import numpy as np
+
+
+
+def convert_listlist(pure_list, ):
+    """Converts a list of lists to numba.
+    """
+    numba_list = NumbaList.empty_list(types.int64[::1])
+    for sub in pure_list:
+        arr = np.asarray(sub, dtype=np.int64)
+        numba_list.append(arr)
+    return numba_list
 
 
 @jit(nopython=True, parallel=True)

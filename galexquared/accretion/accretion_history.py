@@ -194,7 +194,7 @@ class AccretionHistory:
     def born_ids(self, snap):
         """Particles appearing on a given snapshot
         """
-        return self.snap_particle_dict[snap]
+        return self.snap_particle_dict[snap] if snap in self.snap_particle_dict else np.array([])
 
     def born_between(self, ft, st=0, mode="snapshot"):
         """Particles appearing between stamps st and ft. These might be time in Gyr or snapshot numbers.
@@ -340,7 +340,8 @@ class AccretionHistory:
             for snapshot in tqdm(snapshot_list, total=len(snapshot_list)):
                 self._snap_particles[snapshot] = _assign_halo(
                     snapshot,
-                    self.born_between(snapshot) if trajectories else self.snap_particle_dict[snapshot],
+                    self.born_ids(snapshot),
+                    self.born_between(snapshot) if trajectories else self.born_ids(snapshot),
                     self.mergertree,
                     self._ptype,
                     self._files,
@@ -370,9 +371,10 @@ class AccretionHistory:
                 
             tasks = []
             for snapshot in snapshot_list:
-                particle_indexes = self.born_between(snapshot) if trajectories else self.snap_particle_dict[snapshot]
+                particle_indexes = self.born_between(snapshot) if trajectories else self.born_ids(snapshot)
                 tasks.append((
                     (snapshot,
+                    self.born_ids(snapshot),
                     particle_indexes,
                     self.mergertree,
                     self._ptype,
