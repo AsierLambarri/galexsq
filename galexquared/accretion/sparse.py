@@ -34,6 +34,8 @@ def _greedy_assign(rows, cols, dists, n_particles, Dmax):
     return halo_to_particles
     
 
+
+
 def _build_triplets_3v(halo_vel_means, halo_cov_invs, candidate_list, halo_scalings, particle_velocities):
     """Build sparse matrix (row, col, dist) triplets for Mahalanobis distances.
     """
@@ -47,8 +49,8 @@ def _build_triplets_3v(halo_vel_means, halo_cov_invs, candidate_list, halo_scali
         _, vs = halo_scalings[j]
         mu    = np.asarray(halo_vel_means[j], dtype=float)
         inv   = np.asarray(halo_cov_invs[j], dtype=float)
-        vels  = particle_velocities[idxs] / vs          # (M_j, 3)
-        dv    = vels - mu[None, :]                      # (M_j, 3)
+        vels  = particle_velocities[idxs]              # (M_j, 3)
+        dv    = (vels - mu[None, :]) / vs                     # (M_j, 3)
         
         # Mahalanobis‑squared distance
         #D2    = np.einsum('ij,ij->i', dv.dot(inv), dv)  # (M_j,)
@@ -76,11 +78,11 @@ def _build_triplets_3d3v(halo_means, halo_cov_invs, candidate_list, halo_scaling
         mu_pos, mu_vel = halo_means[j]         # two (3,) arrays
         inv_pos, inv_vel = halo_cov_invs[j]    # two (3,3) arrays
 
-        x = particle_positions[idxs] / rs
-        v = particle_velocities[idxs] / vs
+        x = particle_positions[idxs] 
+        v = particle_velocities[idxs] 
 
-        dx = x - mu_pos[None, :]
-        dv = v - mu_vel[None, :]
+        dx = (x - mu_pos[None, :]) / rs
+        dv = (v - mu_vel[None, :]) / vs
 
         D2_pos = np.einsum("ij,ij->i", dx @ inv_pos, dx)
         D2_vel = np.einsum("ij,ij->i", dv @ inv_vel, dv)
@@ -95,65 +97,134 @@ def _build_triplets_3d3v(halo_means, halo_cov_invs, candidate_list, halo_scaling
 
     
 
-def _build_triplets_6dv(halo_means, halo_covs, candidate_list, particle_positions, particle_velocities):
+def _build_triplets_6dv(halo_means, halo_cov_invs, candidate_list, halo_scalings, particle_positions, particle_velocities):
     rows, cols, dists = [], [], []
+
 
     for j, valid in enumerate(candidate_list):
         idxs = np.asarray(valid, dtype=int)
         if idxs.size == 0:
             continue
 
-        mu = np.asarray(halo_means[j], dtype=float)         # shape (6,)
-        inv = np.asarray(halo_covs[j], dtype=float)         # shape (6, 6)
+        rs, vs = halo_scalings[j]
+        mu_pos, mu_vel = halo_means[j]         # two (3,) arrays
+        inv = halo_cov_invs[j]    
 
-        x = particle_positions[idxs]
-        v = particle_velocities[idxs]
-        x6 = np.hstack((x, v))                              # shape (N, 6)
+        x = particle_positions[idxs] 
+        v = particle_velocities[idxs] 
 
-        dx6 = x6 - mu[None, :]                              # (N, 6)
+        dx = (x - mu_pos[None, :]) / rs
+        dv = (v - mu_vel[None, :]) / vs
+        dx6 = np.hstack((dx, dv))
+    
         D2 = np.einsum("ij,ij->i", dx6 @ inv, dx6)
 
         rows.extend(idxs.tolist())
         cols.extend([j] * idxs.size)
         dists.extend(D2.tolist())
 
-        gc.collect()
-        
     return rows, cols, dists #np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32), np.array(dists, dtype=np.float64)
 
 
 
 
 
-#def _build_triplets_3d3v(halo_pos_means, halo_pos_covs, halo_vel_means, halo_vel_covs, candidate_list, particle_positions, particle_velocities):
-#    rows, cols, dists = [], [], []
 
-#    for j, valid in enumerate(candidate_list):
-#        idxs = np.asarray(valid, dtype=int)
-#        if idxs.size == 0:
-#            continue
 
-#        mu_pos = np.asarray(halo_pos_means[j], dtype=float)
-#        mu_vel = np.asarray(halo_vel_means[j], dtype=float)
-#        inv_pos = np.asarray(halo_pos_covs[j], dtype=float)
-#        inv_vel = np.asarray(halo_vel_covs[j], dtype=float)
 
-#        x = particle_positions[idxs]
-#        v = particle_velocities[idxs]
 
-#        dx = x - mu_pos[None, :]
-#        dv = v - mu_vel[None, :]
 
-#        D2_pos = np.einsum("ij,ij->i", dx @ inv_pos, dx)
-#        D2_vel = np.einsum("ij,ij->i", dv @ inv_vel, dv)
 
-#        D2 = D2_pos + D2_vel
 
-#        rows.extend(idxs.tolist())
-#        cols.extend([j] * idxs.size)
-#        dists.extend(D2.tolist())
 
-#        gc.collect()
+
+
+
+
+
+
+def _build_covinv_3v(candidate_list, halo_scalings, particle_velocities, reg):
+    """Build inverse covariance matrix for 3v case.
+    """
+    halo_cov_invs = []
+    for j, valid_indices in enumerate(candidate_list):
+        _, vel_scale = halo_scalings[j]
         
-#    return rows, cols, dists #np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32), np.array(dists, dtype=np.float64)
+        if valid_indices.size < 10000 and valid_indices.size > 1:
+            cov_inv = np.linalg.inv(
+                np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
+            )
+        elif valid_indices.size >= 10000:
+            cov_inv = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
+        else:
+            cov_inv = np.eye(3)
+            
+        halo_cov_invs.append(cov_inv)
+    return halo_cov_invs
+
+            
+def _build_covinv_3d3v(candidate_list, halo_scalings, particle_positions, particle_velocities, reg):
+    """Build inverse covariance matrix for 3d+3v case.
+    """    
+    halo_cov_invs = []
+    for j, valid_indices in enumerate(candidate_list):
+        pos_scale, vel_scale = halo_scalings[j]
+        
+        if valid_indices.size >= 10000:
+            cov_inv_x = numba_cov_inv(particle_positions[valid_indices] / pos_scale, reg=reg)
+            cov_inv_y = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
+        elif valid_indices.size < 10000 and valid_indices.size > 1:
+            cov_inv_x = np.linalg.inv(
+                np.cov(particle_positions[valid_indices] / pos_scale, rowvar=False) + reg * np.eye(3)
+            )
+            cov_inv_y = np.linalg.inv(
+                np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
+            )
+        else:
+            cov_inv_x = np.eye(3)
+            cov_inv_y = np.eye(3)
+            
+        
+            
+        halo_cov_invs.append((cov_inv_x, cov_inv_y))
+    return halo_cov_invs
+
+
+def _build_covinv_6d(candidate_list, halo_scalings, particle_positions, particle_velocities, reg):
+    """Build inverse covariance matrix for 6d case.
+    """
+    halo_cov_invs = []
+    for j, valid_indices in enumerate(candidate_list):
+        pos_scale, vel_scale = halo_scalings[j]
+        
+        if valid_indices.size >= 10000:
+            x6 = np.hstack((particle_positions[valid_indices] / pos_scale, particle_velocities[valid_indices] / vel_scale))
+            cov_inv = numba_cov_inv(x6, reg=reg)
+        elif valid_indices.size < 10000 and valid_indices.size > 1:
+            x6 = np.hstack((particle_positions[valid_indices] / pos_scale, particle_velocities[valid_indices] / vel_scale))
+            cov_inv = np.linalg.inv(
+                np.cov(x6, rowvar=False) + reg * np.eye(6)
+            )
+
+        else:
+            cov_inv = np.eye(6)
+            
+
+        halo_cov_invs.append(cov_inv)
+    return halo_cov_invs
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

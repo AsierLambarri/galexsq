@@ -1,18 +1,15 @@
 import gc
 
 import yt
-import numba
 import numpy as np
 import pandas as pd
 from scipy.spatial import KDTree
-from scipy.sparse import coo_array
 
 from time import time
-from collections import defaultdict
 
-from .sparse import _build_triplets_3v, _build_triplets_3d3v, _build_triplets_6dv, _greedy_assign
+from .sparse import _build_triplets_3v, _build_triplets_3d3v, _build_triplets_6dv, _build_covinv_3v, _build_covinv_3d3v, _build_covinv_6d, _greedy_assign
 from ._helpers import _nfw_potential
-from ._numba_helpers import numba_cov_inv, numba_cov
+from ._numba_helpers import numba_cov_inv
 from ..tracking._helpers import best_dtype
 
 
@@ -24,187 +21,15 @@ def _halo_loop_3v(
     ):
     """Organizer for halo loop only considering Dij with velocity.
     """
-    n = particle_indices.size
-    k = len(merger_df)
-    reg = 0.1 / (n * k)
+    # n = particle_indices.size
+    # k = len(merger_df)
+    # reg = 0.1 / (n * k)
 
     redshift = merger_df["Redshift"].values[0]
     particle_tree = KDTree(particle_positions)
     
     halo_means = []
-    halo_cov_invs = []
-    halo_scalings = []
-    candidate_list = []
-    
-    for j, (_, halo) in enumerate(merger_df.iterrows()):
-        halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
-        halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
-        halo_c = halo['virial_radius'] / halo['scale_radius']
-
-        pos_scale = 2.16258 * halo['scale_radius']
-        vel_scale = halo['vmax']
-        
-        halo_scalings.append((pos_scale, vel_scale))
-        
-        local_indices = np.array(particle_tree.query_ball_point(halo_center, r=halo['virial_radius']))
-        if local_indices.size == 0:
-            candidate_list.append(local_indices)
-            halo_means.append(halo_vel / vel_scale)
-            halo_cov_invs.append(np.eye(3))
-            continue  
-
-        pos_subset = particle_positions[local_indices]     # in kpccm 
-        vel_subset = particle_velocities[local_indices]    # in km/s
-        rel_positions = pos_subset - halo_center
-        rel_velocities = vel_subset - halo_vel
-
-        distances = np.linalg.norm(rel_positions, axis=1)  # in kpccm
-        vel_mags = np.linalg.norm(rel_velocities, axis=1)  # in km/s
-        
-        
-        denom = np.log(1 + halo_c) - halo_c / (1 + halo_c)
-        if denom == 0:
-            v_esc = np.ones_like(distances) * -1
-        else:
-            phi = _nfw_potential(
-                distances / (1 + redshift),
-                halo['mass'],
-                halo['scale_radius'] / (1 + redshift),
-                halo_c,
-                4.3E-6,
-                0.08
-            )
-            v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
-
-        bound_mask = vel_mags < v_esc        
-        valid_indices = local_indices[bound_mask]
-        candidate_list.append(valid_indices)
-        
-        if valid_indices.size < 10000 and valid_indices.size > 1:
-            cov_inv = np.linalg.inv(
-                np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
-            )
-        elif valid_indices.size >= 10000:
-            cov_inv = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
-        else:
-            cov_inv = np.eye(3)
-
-
-        halo_cov_invs.append(cov_inv)
-        halo_means.append(halo_vel / vel_scale)
-    
-    del particle_tree
-    gc.collect()
-    
-    return halo_means, halo_cov_invs, halo_scalings, candidate_list
-    
-
-def _halo_loop_3d3v(
-    merger_df,
-    particle_indices,
-    particle_positions,
-    particle_velocities
-    ):
-    """Organizer for halo loop only considering Dij with position and velocity separated.
-    """
-    n = particle_indices.size
-    k = len(merger_df)
-    reg = 0.1 / (n * k)
-
-    redshift = merger_df["Redshift"].values[0]
-    particle_tree = KDTree(particle_positions)
-    
-    halo_means = []
-    halo_cov_invs = []
-    halo_scalings = []
-    candidate_list = []
-    
-    for j, (_, halo) in enumerate(merger_df.iterrows()):
-        halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
-        halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
-        halo_c = halo['virial_radius'] / halo['scale_radius']
-
-        pos_scale = 2.16258 * halo['scale_radius']
-        vel_scale = halo['vmax']
-        
-        halo_scalings.append((pos_scale, vel_scale))
-        
-        local_indices = np.array(particle_tree.query_ball_point(halo_center, r=halo['virial_radius']))
-        if local_indices.size == 0:
-            candidate_list.append(local_indices)
-            halo_means.append((halo_center / pos_scale, halo_vel / vel_scale))
-            halo_cov_invs.append((np.eye(3), np.eye(3)))
-            continue  
-
-        pos_subset = particle_positions[local_indices]     # in kpccm 
-        vel_subset = particle_velocities[local_indices]    # in km/s
-        rel_positions = pos_subset - halo_center
-        rel_velocities = vel_subset - halo_vel
-
-        distances = np.linalg.norm(rel_positions, axis=1)  # in kpccm
-        vel_mags = np.linalg.norm(rel_velocities, axis=1)  # in km/s
-        
-        
-        denom = np.log(1 + halo_c) - halo_c / (1 + halo_c)
-        if denom == 0:
-            v_esc = np.ones_like(distances) * -1
-        else:
-            phi = _nfw_potential(
-                distances / (1 + redshift),
-                halo['mass'],
-                halo['scale_radius'] / (1 + redshift),
-                halo_c,
-                4.3E-6,
-                0.08
-            )
-            v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
-
-        bound_mask = vel_mags < v_esc        
-        valid_indices = local_indices[bound_mask]
-        candidate_list.append(valid_indices)
-        
-        if valid_indices.size >= 10000:
-            cov_inv_x = numba_cov_inv(particle_positions[valid_indices] / pos_scale, reg=reg)
-            cov_inv_y = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
-        elif valid_indices.size < 10000 and valid_indices.size > 1:
-            cov_inv_x = np.linalg.inv(
-                np.cov(particle_positions[valid_indices] / pos_scale, rowvar=False) + reg * np.eye(3)
-            )
-            cov_inv_y = np.linalg.inv(
-                np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
-            )
-        else:
-            cov_inv_x = np.eye(3)
-            cov_inv_y = np.eye(3)
-
-
-        halo_cov_invs.append((cov_inv_x, cov_inv_y))
-        halo_means.append((halo_center / pos_scale, halo_vel / vel_scale))
-    
-    del particle_tree
-    gc.collect()
-    
-    return halo_means, halo_cov_invs, halo_scalings, candidate_list
-
-
-#does not work yet!
-def _halo_loop_6d(
-    merger_df,
-    particle_indices,
-    particle_positions,
-    particle_velocities
-    ):
-    """Organizer for halo loop only considering Dij with 6d phase space.
-    """
-    n = particle_indices.size
-    k = len(merger_df)
-    reg = 0.1 / (n * k)
-
-    redshift = merger_df["Redshift"].values[0]
-    particle_tree = KDTree(particle_positions)
-    
-    halo_means = []
-    halo_cov_invs = []
+    #halo_cov_invs = []
     halo_scalings = []
     candidate_list = []
     
@@ -222,7 +47,7 @@ def _halo_loop_6d(
         if local_indices.size == 0:
             candidate_list.append(local_indices)
             halo_means.append(halo_vel)
-            halo_cov_invs.append(np.eye(3))
+            #halo_cov_invs.append(np.eye(3))
             continue  
 
         pos_subset = particle_positions[local_indices]     # in kpccm 
@@ -252,20 +77,191 @@ def _halo_loop_6d(
         valid_indices = local_indices[bound_mask]
         candidate_list.append(valid_indices)
         
-        if valid_indices.size > 1:
-            speeds = particle_velocities[valid_indices]
-            cov_inv = numba_cov_inv(speeds, reg=reg)
-        else:
-            cov_inv = np.eye(3)
+        # if valid_indices.size < 10000 and valid_indices.size > 1:
+        #     cov_inv = np.linalg.inv(
+        #         np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
+        #     )
+        # elif valid_indices.size >= 10000:
+        #     cov_inv = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
+        # else:
+        #     cov_inv = np.eye(3)
 
 
-        halo_cov_invs.append(cov_inv)
+        # halo_cov_invs.append(cov_inv)
         halo_means.append(halo_vel)
     
     del particle_tree
     gc.collect()
     
-    return halo_means, halo_cov_invs, halo_scalings, candidate_list
+    return halo_means, halo_scalings, candidate_list
+    
+
+def _halo_loop_3d3v(
+    merger_df,
+    particle_indices,
+    particle_positions,
+    particle_velocities
+    ):
+    """Organizer for halo loop only considering Dij with position and velocity separated.
+    """
+    # n = particle_indices.size
+    # k = len(merger_df)
+    # reg = 0.1 / (n * k)
+
+    redshift = merger_df["Redshift"].values[0]
+    particle_tree = KDTree(particle_positions)
+    
+    halo_means = []
+    #halo_cov_invs = []
+    halo_scalings = []
+    candidate_list = []
+    
+    for j, (_, halo) in enumerate(merger_df.iterrows()):
+        halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
+        halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
+        halo_c = halo['virial_radius'] / halo['scale_radius']
+
+        pos_scale = 2.16258 * halo['scale_radius']
+        vel_scale = halo['vmax']
+        
+        halo_scalings.append((pos_scale, vel_scale))
+        
+        local_indices = np.array(particle_tree.query_ball_point(halo_center, r=halo['virial_radius']))
+        if local_indices.size == 0:
+            candidate_list.append(local_indices)
+            halo_means.append((halo_center, halo_vel))
+            #halo_cov_invs.append((np.eye(3), np.eye(3)))
+            continue  
+
+        pos_subset = particle_positions[local_indices]     # in kpccm 
+        vel_subset = particle_velocities[local_indices]    # in km/s
+        rel_positions = pos_subset - halo_center
+        rel_velocities = vel_subset - halo_vel
+
+        distances = np.linalg.norm(rel_positions, axis=1)  # in kpccm
+        vel_mags = np.linalg.norm(rel_velocities, axis=1)  # in km/s
+        
+        
+        denom = np.log(1 + halo_c) - halo_c / (1 + halo_c)
+        if denom == 0:
+            v_esc = np.ones_like(distances) * -1
+        else:
+            phi = _nfw_potential(
+                distances / (1 + redshift),
+                halo['mass'],
+                halo['scale_radius'] / (1 + redshift),
+                halo_c,
+                4.3E-6,
+                0.08
+            )
+            v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
+
+        bound_mask = vel_mags < v_esc        
+        valid_indices = local_indices[bound_mask]
+        candidate_list.append(valid_indices)
+        
+        # if valid_indices.size >= 10000:
+        #     cov_inv_x = numba_cov_inv(particle_positions[valid_indices] / pos_scale, reg=reg)
+        #     cov_inv_y = numba_cov_inv(particle_velocities[valid_indices] / vel_scale, reg=reg)
+        # elif valid_indices.size < 10000 and valid_indices.size > 1:
+        #     cov_inv_x = np.linalg.inv(
+        #         np.cov(particle_positions[valid_indices] / pos_scale, rowvar=False) + reg * np.eye(3)
+        #     )
+        #     cov_inv_y = np.linalg.inv(
+        #         np.cov(particle_velocities[valid_indices] / vel_scale, rowvar=False) + reg * np.eye(3)
+        #     )
+        # else:
+        #     cov_inv_x = np.eye(3)
+        #     cov_inv_y = np.eye(3)
+
+
+        # halo_cov_invs.append((cov_inv_x, cov_inv_y))
+        halo_means.append((halo_center, halo_vel))
+    
+    del particle_tree
+    gc.collect()
+    
+    return halo_means, halo_scalings, candidate_list
+
+
+def _halo_loop_6d(
+    merger_df,
+    particle_indices,
+    particle_positions,
+    particle_velocities
+    ):
+    """Organizer for halo loop only considering Dij with 6d phase space.
+    """
+    # n = particle_indices.size
+    # k = len(merger_df)
+    # reg = 0.1 / (n * k)
+
+    redshift = merger_df["Redshift"].values[0]
+    particle_tree = KDTree(particle_positions)
+    
+    halo_means = []
+    #halo_cov_invs = []
+    halo_scalings = []
+    candidate_list = []
+    
+    for j, (_, halo) in enumerate(merger_df.iterrows()):
+        halo_center = np.array([halo['position_x'], halo['position_y'], halo['position_z']]) 
+        halo_vel = np.array([halo['velocity_x'], halo['velocity_y'], halo['velocity_z']]) 
+        halo_c = halo['virial_radius'] / halo['scale_radius']
+
+        pos_scale = 2.16258 * halo['scale_radius']
+        vel_scale = halo['vmax']
+        
+        halo_scalings.append((pos_scale, vel_scale))
+        
+        local_indices = np.array(particle_tree.query_ball_point(halo_center, r=halo['virial_radius']))
+        if local_indices.size == 0:
+            candidate_list.append(local_indices)
+            halo_means.append((halo_center, halo_vel))
+            # halo_cov_invs.append((np.eye(3), np.eye(3)))
+            continue  
+
+        pos_subset = particle_positions[local_indices]     # in kpccm 
+        vel_subset = particle_velocities[local_indices]    # in km/s
+        rel_positions = pos_subset - halo_center
+        rel_velocities = vel_subset - halo_vel
+
+        distances = np.linalg.norm(rel_positions, axis=1)  # in kpccm
+        vel_mags = np.linalg.norm(rel_velocities, axis=1)  # in km/s
+        
+        
+        denom = np.log(1 + halo_c) - halo_c / (1 + halo_c)
+        if denom == 0:
+            v_esc = np.ones_like(distances) * -1
+        else:
+            phi = _nfw_potential(
+                distances / (1 + redshift),
+                halo['mass'],
+                halo['scale_radius'] / (1 + redshift),
+                halo_c,
+                4.3E-6,
+                0.08
+            )
+            v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
+
+        bound_mask = vel_mags < v_esc        
+        valid_indices = local_indices[bound_mask]
+        candidate_list.append(valid_indices)
+        
+        # if valid_indices.size > 1:
+        #     speeds = particle_velocities[valid_indices]
+        #     cov_inv = numba_cov_inv(speeds, reg=reg)
+        # else:
+        #     cov_inv = np.eye(3)
+
+
+        # halo_cov_invs.append(cov_inv)
+        halo_means.append((halo_center, halo_vel))
+    
+    del particle_tree
+    gc.collect()
+    
+    return halo_means, halo_scalings, candidate_list
     
 
 
@@ -334,40 +330,45 @@ def assign_particle_positions_bipartite(
 
     t1 = time()
     if space in ["3", "3v"]:
-        halo_means, halo_cov_invs, halo_scalings, candidate_list = _halo_loop_3v(
+        halo_means, halo_scalings, candidate_list = _halo_loop_3v(
             merger_df, 
             particle_indices, 
             particle_positions, 
             particle_velocities
         )
+        halo_cov_invs = _build_covinv_3v(candidate_list, halo_scalings, particle_velocities, regularization)
         t2 = time()
         
         rows, cols, dists = _build_triplets_3v(halo_means, halo_cov_invs, candidate_list, halo_scalings, particle_velocities)
         
-    elif space == "3d+3v":
-        halo_means, halo_cov_invs, halo_scalings, candidate_list = _halo_loop_3d3v(
+    elif space in ["3d+3v", "3+3"]:
+        halo_means, halo_scalings, candidate_list = _halo_loop_3d3v(
             merger_df, 
             particle_indices, 
             particle_positions, 
             particle_velocities
         )
+        
+        halo_cov_invs = _build_covinv_3d3v(candidate_list, halo_scalings, particle_positions, particle_velocities, regularization)
         t2 = time()
         
         rows, cols, dists = _build_triplets_3d3v(halo_means, halo_cov_invs, candidate_list, halo_scalings, particle_positions, particle_velocities)
 
-    #elif space == "6d:
-    #    halo_means, halo_cov_invs, halo_scalings, candidate_list = _halo_loop_3v(
-    #        merger_df, 
-    #        particle_indices, 
-    #        particle_positions, 
-    #        particle_velocities
-    #    )
-    #    t2 = time()
-    #
-    #    rows, cols, dists = _build_triplets_6dv(halo_means, halo_cov_invs, candidate_list, particle_positions / halo_scalings[0], particle_velocities / halo_scalings[1])
+    elif space in ["6d", "6"]:
+        halo_means, halo_scalings, candidate_list = _halo_loop_6d(
+            merger_df, 
+            particle_indices, 
+            particle_positions, 
+            particle_velocities
+        )
+        halo_cov_invs = _build_covinv_6d(candidate_list, halo_scalings, particle_positions, particle_velocities, regularization)
+
+        t2 = time()
+    
+        rows, cols, dists = _build_triplets_6dv(halo_means, halo_cov_invs, candidate_list, halo_scalings, particle_positions, particle_velocities)
 
     else:
-        raise Exception(f"You didnt provide a valid phase space search mode!")
+        raise Exception("You didnt provide a valid phase space search mode!")
 
     
     rows  = np.array(rows, dtype=best_dtype(rows))

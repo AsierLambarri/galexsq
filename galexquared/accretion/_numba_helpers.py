@@ -47,7 +47,7 @@ def numba_cov_inv(X, rowvar=False, reg=1E-10):
     Returns the inverse covariance matrix.
     """
     cov = numba_cov(X, rowvar)
-    return np.linalg.inv(cov + reg * np.eye(3))
+    return np.linalg.inv(cov + reg * np.eye(X.shape[1]))
 
 
 
