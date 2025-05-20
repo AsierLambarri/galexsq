@@ -79,12 +79,18 @@ class MergerTree:
         return self._CompleteTree
     @property
     def MainTree(self):
+        if "TreeNum" not in self._CompleteTree.columns:
+            return None
+        
         if hasattr(self, "principal_subid"):
             return self._CompleteTree[self._CompleteTree["TreeNum"] == 0]
         else:
             return self._MainTree
     @property
     def SatelliteTrees(self):
+        if "TreeNum" not in self._CompleteTree.columns:
+            return None
+        
         if hasattr(self, "principal_subid"):
             return self._CompleteTree[self._CompleteTree["TreeNum"] != 0]
         else:
@@ -277,7 +283,7 @@ class MergerTree:
 
         self.snap_min, self.snap_max = int(self.CompleteTree['Snapshot'].values.min()), int(self.CompleteTree['Snapshot'].values.max())
 
-        self.principal_subid, tree_num = self.CompleteTree.sort_values(['mass', 'Snapshot'], ascending = (False, True))[["Sub_tree_id", "TreeNum"]].values[0]
+        self.principal_subid = self.CompleteTree.sort_values(['mass', 'Snapshot'], ascending = (False, True))["Sub_tree_id"].values[0]
         
         #self._PrincipalLeaf = self.CompleteTree[self.CompleteTree["Sub_tree_id"] == self.principal_subid]
         #self._MainTree = self.CompleteTree[self.CompleteTree["TreeNum"] == tree_num]
@@ -287,20 +293,24 @@ class MergerTree:
 
 
     
-    def set_equivalence(self, equiv):
+    def set_equivalence(self, equiv, fmt="guess"):
         """Loads and sets equivalence table.
         """
-        if isinstance(equiv, str):
-            if not equiv.endswith("csv"):
-                self._equiv = load_ftable(equiv)
+        if fmt=="guess":
+            if isinstance(equiv, str):
+                if not equiv.endswith("csv"):
+                    self._equiv = load_ftable(equiv)
+                else:
+                    self._equiv = pd.read_csv(equiv)
+                    
+            elif isinstance(equiv, pd.DataFrame):
+                self._equiv = equiv
+    
             else:
-                self._equiv = pd.read_csv(equiv)
-                
-        elif isinstance(equiv, pd.DataFrame):
-            self._equiv = equiv
-
-        else:
-            raise AttributeError("Could not set equivalence table!")
+                raise AttributeError("Could not set equivalence table!")
+        elif fmt=="fixed_width": self._equiv = load_ftable(equiv)
+        elif fmt=="csv": self._equiv = pd.read_csv(equiv)
+        else: raise AttributeError("Could not set equivalence table!")
 
         
     def construc_df_tree(self, treenum, maingal=False):
