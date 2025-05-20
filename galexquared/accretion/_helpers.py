@@ -49,4 +49,3 @@ def _nfw_potential(r, mvir, rs, c, G, soft):
 
 
 
-

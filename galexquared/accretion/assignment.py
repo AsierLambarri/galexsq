@@ -7,6 +7,7 @@ from scipy.spatial import KDTree
 
 from time import time
 
+from .accretion_history import custom_load
 from .sparse import _build_triplets_3v, _build_triplets_3d3v, _build_triplets_6dv, _build_covinv_3v, _build_covinv_3d3v, _build_covinv_6d, _greedy_assign
 from ._helpers import _nfw_potential
 from ..tracking._helpers import best_dtype
@@ -268,18 +269,6 @@ def _halo_loop_6d(
 
 
 
-
-
-
-
-
-
-
-
-    
-
-
-
 def assign_particle_positions_bipartite(
     merger_df, 
     particle_indices, 
@@ -415,9 +404,6 @@ def assign_particle_positions_bipartite(
     time_stats["rest"] = t6 - t5
     
     return particles_df, time_stats
-
-
-
 
 
 
@@ -648,9 +634,6 @@ def assign_particle_positions(
 
 
 
-
-    
-
 def _assign_halo(
         snap, 
         newborn_indexes,
@@ -672,7 +655,7 @@ def _assign_halo(
     fn = int(mergertree.equivalence_table[mergertree.equivalence_table["snapshot"] == snap].index[0])
     merger_df = mergertree.CompleteTree[mergertree.CompleteTree["Snapshot"] == snap]
 
-    ds = yt.load(file_list[fn])
+    ds = custom_load(file_list[fn], ptype)
     
 
     #Add a particle filter that selects particles with the given indexes.

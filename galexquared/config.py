@@ -1,7 +1,5 @@
 import yt
-import yaml
 from pathlib import Path
-from unyt import unyt_quantity
 import warnings
 
 
@@ -67,10 +65,10 @@ class Config:
     def _set_loader(self):
         """Sets the loader
         """
-        if self.code == "ART":
+        if self.code.upper() in ["ART", "ART-I", "GEAR"]:
             self.loader = yt.load #light_ARTI_loader
-        elif self.code == "GEAR":
-            self.loader = yt.load #light_GEAR_loader
+        elif self.code.upper() in ["RAMSES", "VINTERGATAN"]:
+            self.loader = yt.load
         else:
             self.loader = yt.load
 

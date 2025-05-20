@@ -2,13 +2,10 @@ import os
 import gc
 
 import yt
-import numba
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-from numba import set_num_threads
 
-from time import time
 import collections.abc
 
 from ._helpers import _goofy_mass_scaling, _check_particle_uniqueness, _remove_duplicates
@@ -16,6 +13,33 @@ from .assignment import _assign_halo, _assign_halo_wrapper
 from ..mergertree import MergerTree
 from ..config import config
 
+
+def custom_load(fn, ptype):
+    """Loads
+    """
+    if config.code in ["ART", "ART-I", "GEAR"]:
+        return yt.load(fn)
+    elif config.code in ["RAMSES", "VINTERGATAN"]:
+        ds = yt.load(
+            fn,
+            extra_particle_fields=[
+                ('particle_potential', 'd'), 
+                ("conformal_birth_time", 'd'), 
+                ('particle_metallicity0', 'd'), 
+                ("particle_metallicity1", 'd'),
+                ("particle_tag", 'i'), 
+                ("particle_birth_time", 'd'), 
+                ('particle_birth_mass', 'd')
+            ]
+        )
+        yt.add_particle_filter(
+            ptype,
+            function=lambda pfilter, data: data[pfilter.filtered_type, "particle_birth_time"] > 0,
+            requires=["particle_birth_time"],
+            filtered_type="all"
+        )
+        ds.add_particle_filter(ptype)
+        return ds
 
 
 class AccretionHistory:
@@ -131,8 +155,15 @@ class AccretionHistory:
             pass
         elif config.code == "GEAR":
             ds.add_field(
-                ("PartType1", "particle_creation_time"),
-                function=lambda field, data: ds.cosmology.t_from_a(data['PartType1', 'StarFormationTime']),
+                (self._ptype, "particle_creation_time"),
+                function=lambda field, data: ds.cosmology.t_from_a(data[self._ptype, 'StarFormationTime']),
+                sampling_type="local",
+                units='Gyr'
+            )
+        elif config.code == ["RASMSES", "VINTERGATAN"]:
+            ds.add_field(
+                (self._ptype, "particle_creation_time"),
+                function=lambda field, data: data[self._ptype, "particle_birth_time"],
                 sampling_type="local",
                 units='Gyr'
             )
@@ -250,7 +281,8 @@ class AccretionHistory:
         else:
             halo_params = self.mergertree.get_halo_params(subtree, snapshot=snap)
             
-        ds = self.ts[index]
+        #ds = self.ts[index]
+        ds = custom_load(self._files[index], self._ptype)
         ds = self._add_creation_time(ds)
 
         if (subtree in ["na", "NA"]) or (subtree is None):
