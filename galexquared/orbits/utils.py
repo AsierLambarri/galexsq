@@ -192,10 +192,10 @@ def refind_pericenters_apocenters(time, radius, verbose=0):
         print("")
         print("Pericenters:")
         for value in pp["peri"]:
-            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value["coeffs"][0]:.2e}")
+            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value['coeffs'][0]:.2e}")
         print("Apocenters:")
         for value in pp["apo"]:
-            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value["coeffs"][0]:.2e}")
+            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value['coeffs'][0]:.2e}")
             
 
     return peri_apo, peri_apo_all
