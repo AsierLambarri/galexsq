@@ -1,4 +1,5 @@
 import gc
+import warnings
 
 import yt
 import numpy as np
@@ -7,9 +8,8 @@ from scipy.spatial import KDTree
 
 from time import time
 
-from .accretion_history import custom_load
 from .sparse import _build_triplets_3v, _build_triplets_3d3v, _build_triplets_6dv, _build_covinv_3v, _build_covinv_3d3v, _build_covinv_6d, _greedy_assign
-from ._helpers import _nfw_potential
+from ._helpers import potential, custom_load
 from ..tracking._helpers import best_dtype
 
 
@@ -17,7 +17,8 @@ def _halo_loop_3v(
     merger_df,
     particle_indices,
     particle_positions,
-    particle_velocities
+    particle_velocities,
+    pot_mode="kepler"
     ):
     """Organizer for halo loop only considering Dij with velocity.
     """
@@ -63,13 +64,13 @@ def _halo_loop_3v(
         if denom == 0:
             v_esc = np.ones_like(distances) * -1
         else:
-            phi = _nfw_potential(
+            phi = potential(
                 distances / (1 + redshift),
-                halo['mass'],
-                halo['scale_radius'] / (1 + redshift),
-                halo_c,
-                4.3E-6,
-                0.08
+                mode=pot_mode,
+                mass=halo['mass'],
+                rs=halo['scale_radius'] / (1 + redshift),
+                c=halo_c,
+                G=4.3E-6,
             )
             v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
 
@@ -100,7 +101,8 @@ def _halo_loop_3d3v(
     merger_df,
     particle_indices,
     particle_positions,
-    particle_velocities
+    particle_velocities,
+    pot_mode="kepler"
     ):
     """Organizer for halo loop only considering Dij with position and velocity separated.
     """
@@ -146,13 +148,13 @@ def _halo_loop_3d3v(
         if denom == 0:
             v_esc = np.ones_like(distances) * -1
         else:
-            phi = _nfw_potential(
+            phi = potential(
                 distances / (1 + redshift),
-                halo['mass'],
-                halo['scale_radius'] / (1 + redshift),
-                halo_c,
-                4.3E-6,
-                0.08
+                mode=pot_mode,
+                mass=halo['mass'],
+                rs=halo['scale_radius'] / (1 + redshift),
+                c=halo_c,
+                G=4.3E-6,
             )
             v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
 
@@ -188,7 +190,8 @@ def _halo_loop_6d(
     merger_df,
     particle_indices,
     particle_positions,
-    particle_velocities
+    particle_velocities,
+    pot_mode="kepler"
     ):
     """Organizer for halo loop only considering Dij with 6d phase space.
     """
@@ -234,13 +237,13 @@ def _halo_loop_6d(
         if denom == 0:
             v_esc = np.ones_like(distances) * -1
         else:
-            phi = _nfw_potential(
+            phi = potential(
                 distances / (1 + redshift),
-                halo['mass'],
-                halo['scale_radius'] / (1 + redshift),
-                halo_c,
-                4.3E-6,
-                0.08
+                mode=pot_mode,
+                mass=halo['mass'],
+                rs=halo['scale_radius'] / (1 + redshift),
+                c=halo_c,
+                G=4.3E-6,
             )
             v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
 
@@ -297,7 +300,8 @@ def assign_particle_positions_bipartite(
     The subtree_id inside which the each particle is.
     """
     time_stats = {}
-    assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
+    dz_max = np.abs( merger_df["Redshift"].diff() ).max()
+    if  dz_max > 1E-3: warnings.warn(f"Seems you have mixed redshifts in you catalogue! Have care... the maxmimum error is {dz_max:.3e}")
 
     if type_list is None:
         type_list = {
@@ -414,13 +418,15 @@ def _halo_loop(
     particle_positions, 
     particle_velocities, 
     type_list,
-    newborn
+    newborn,
+    pot_mode="kepler"
     ):
     """Assigns particle positions!
     """
     time_stats = {}
-    assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
-
+    dz_max = np.abs( merger_df["Redshift"].diff() ).max()
+    if  dz_max > 1E-3: warnings.warn(f"Seems you have mixed redshifts in you catalogue! Have care... the maxmimum error is {dz_max:.3e}")
+        
     t1 = time()
     redshift      = merger_df["Redshift"].values[0]
     particle_tree = KDTree(particle_positions)
@@ -477,21 +483,31 @@ def _halo_loop(
         if denom == 0:
             v_esc = np.ones_like(distances) * -1
         else:
-            phi = _nfw_potential(
-                distances / (1 + redshift),
-                halo['mass'],
-                halo['scale_radius'] / (1 + redshift),
-                halo_c,
-                4.3E-6,
-                0.08
-            )
+            if np.isnan(halo["uid"]):
+                phi = potential(
+                    distances / (1 + redshift),
+                    mode="kepler",
+                    mass=halo['mass'],
+                    rs=halo['scale_radius'] / (1 + redshift),
+                    c=halo_c,
+                    G=4.3E-6,
+                )
+            else:
+                phi = potential(
+                    distances / (1 + redshift),
+                    mode="nfw",
+                    mass=halo['mass'],
+                    rs=halo['scale_radius'] / (1 + redshift),
+                    c=halo_c,
+                    G=4.3E-6,
+                )
             v_esc = np.sqrt(2 * np.abs(phi))  # in km/s
 
         bound_mask  = vel_mags < v_esc
         metric      = (v_esc**2 - vel_mags**2 ) / vel_scale**2
         
         if newborn:
-            rnorm = distances / min(np.sqrt(halo_c)**1.15 *halo['scale_radius'], min(8, halo['virial_radius']))   ########### aqui igual hay que cortarse un poco con 2 * rs
+            rnorm = distances / max(halo['scale_radius'], 0.1 * halo['virial_radius'])   ########### aqui igual hay que cortarse un poco con 2 * rs
             bind_score = metric
             
             inside_mask = bound_mask & (rnorm <= 1.0)
@@ -522,15 +538,15 @@ def _halo_loop(
             if np.any(update_mask):
                 indices_to_update = np.array(local_indices)[update_mask]
                 particles_df.loc[indices_to_update, 'Sub_tree_id'] = halo["Sub_tree_id"]
-                particles_df.loc[indices_to_update, 'Assigned_Halo_Mass'] = metric[update_mask] 
+                particles_df.loc[indices_to_update, 'Assigned_Halo_Mass'] = metric[update_mask].astype(particles_df['Assigned_Halo_Mass'].dtype)
 
 
     t4 = time()
     if newborn:
         use_in  = best_rnorm  < np.inf
         use_out = (~use_in) & (best_bind > -np.inf)
-        particles_df.loc[use_in,  "Sub_tree_id"] = subtree_rnorm[use_in]
-        particles_df.loc[use_out, "Sub_tree_id"] = subtree_bind[use_out]
+        particles_df.loc[use_in,  "Sub_tree_id"] = subtree_rnorm[use_in].astype(particles_df['Sub_tree_id'].dtype) #subtree_rnorm[use_in]
+        particles_df.loc[use_out, "Sub_tree_id"] = subtree_bind[use_out].astype(particles_df['Sub_tree_id'].dtype) #subtree_bind[use_out]
     else:
         particles_df.drop(columns=['Assigned_Halo_Mass'], inplace=True)
     
@@ -572,7 +588,8 @@ def assign_particle_positions(
     The subtree_id inside which the each particle is.
     """
     time_stats = {}
-    assert len(merger_df["Redshift"].unique()) == 1, "Seems you have mixed redshifts in you catalogue!"
+    dz_max = np.abs( merger_df["Redshift"].diff() ).max()
+    if  dz_max > 1E-3: warnings.warn(f"Seems you have mixed redshifts in you catalogue! Have care... the maxmimum error is {dz_max:.3e}")
     
     if type_list is None:
         type_list = {
@@ -623,7 +640,11 @@ def assign_particle_positions(
         newborn_stats["rest"] = 0
 
 
-    particles_df = pd.concat([existing_df, newborn_df]).reset_index(drop=True)
+    particles_df = pd.concat(
+        [existing_df, newborn_df],
+        ignore_index=True,
+        join='inner'
+    ).reset_index(drop=True)
     for col, dt in zip(["particle_index","Time","Snapshot","Sub_tree_id"], [int, float, int, int]):
         particles_df[col] = particles_df[col].astype(dt)
         
@@ -640,6 +661,7 @@ def _assign_halo(
         particle_indexes, 
         mergertree, 
         ptype, 
+        fields,
         file_list, 
         mode,
         **kwargs
@@ -657,25 +679,23 @@ def _assign_halo(
 
     ds = custom_load(file_list[fn], ptype)
     
-
     #Add a particle filter that selects particles with the given indexes.
     yt.add_particle_filter(
         "present_particles", 
-         function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, "particle_index"], particle_indexes), 
+         function=lambda pfilter, data: np.isin(data[pfilter.filtered_type, fields["index"]], particle_indexes), 
          filtered_type=ptype, 
-         requires=["particle_index", "particle_position", "particle_velocity"]
+         requires=[fields["index"], fields["position"], fields["velocity"]]
     )
     ds.add_particle_filter("present_particles")
 
     
     ad = ds.all_data()
     
-    particle_indices = ad["present_particles", "particle_index"].astype(int).value
-    particle_positions = ad["present_particles", "particle_position"].to("kpccm").value
-    particle_velocities = ad["present_particles", "particle_velocity"].to("km/s").value
+    particle_indices = ad["present_particles", fields["index"]].value.astype(int)
+    particle_positions = ad["present_particles", fields["position"]].to("kpccm").value
+    particle_velocities = ad["present_particles", fields["velocity"]].to("km/s").value
     N = int(len(particle_indices))
     ft = time()
-    
     del ds, ad
     gc.collect()
     

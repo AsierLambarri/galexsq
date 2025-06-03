@@ -1,4 +1,7 @@
+import yt
 import numpy as np
+
+from ..config import config
 
 def _goofy_mass_scaling(max_mass, min_mass):
     log_mass_max = np.log10(max_mass)
@@ -42,10 +45,48 @@ def _remove_duplicates(data):
         new_data[key] = np.array(filtered_list)
     return new_data
 
-def _nfw_potential(r, mvir, rs, c, G, soft):
-    x = np.clip(r, 2 * soft, np.inf) / rs
+def _nfw_potential(r, mvir, rs, c, G):
+    #x = np.clip(r, 0 * 2 * soft, np.inf) / rs
+    x = r / rs
     A_nfw = np.log(1 + c) - c / (1 + c)
     return -G * mvir * rs / A_nfw * np.log(1 + x) / x 
 
+def _kepler_potential(r, mvir, G):
+    return  -G * mvir / r
 
 
+def potential(r, mode="kepler", **kwargs):
+    if mode == "kepler":
+        print("USING KEPLER")
+        mvir, G = kwargs["mass"], kwargs["G"]
+        return _kepler_potential(r, mvir, G)
+    if mode == "nfw":
+        print("USING NFW")
+        mvir, rs, c, G = kwargs["mass"], kwargs["rs"], kwargs["c"], kwargs["G"]
+        return _nfw_potential(r, mvir, rs, c, G)
+
+def custom_load(fn, ptype):
+    """Loads
+    """
+    if config.code in ["ART", "ART-I", "GEAR"]:
+        return yt.load(fn)
+    elif config.code in ["RAMSES", "VINTERGATAN"]:
+        ds = yt.load(
+            fn,
+            extra_particle_fields=[
+                ('particle_potential', 'd'), 
+                ("conformal_birth_time", 'd'), 
+                ('particle_metallicity0', 'd'), 
+                ("particle_metallicity1", 'd'),
+                ("particle_tag", 'd'), 
+                ("particle_birth_time", 'd')
+            ]
+        )
+        yt.add_particle_filter(
+            ptype,
+            function=lambda pfilter, data: data[pfilter.filtered_type, "particle_birth_time"] > 0,
+            requires=["particle_birth_time"],
+            filtered_type="all"
+        )
+        ds.add_particle_filter(ptype)
+        return ds

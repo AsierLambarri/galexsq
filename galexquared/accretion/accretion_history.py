@@ -8,38 +8,13 @@ from tqdm import tqdm
 
 import collections.abc
 
-from ._helpers import _goofy_mass_scaling, _check_particle_uniqueness, _remove_duplicates
+from ._helpers import _goofy_mass_scaling, _check_particle_uniqueness, _remove_duplicates, custom_load
 from .assignment import _assign_halo, _assign_halo_wrapper
 from ..mergertree import MergerTree
 from ..config import config
 
 
-def custom_load(fn, ptype):
-    """Loads
-    """
-    if config.code in ["ART", "ART-I", "GEAR"]:
-        return yt.load(fn)
-    elif config.code in ["RAMSES", "VINTERGATAN"]:
-        ds = yt.load(
-            fn,
-            extra_particle_fields=[
-                ('particle_potential', 'd'), 
-                ("conformal_birth_time", 'd'), 
-                ('particle_metallicity0', 'd'), 
-                ("particle_metallicity1", 'd'),
-                ("particle_tag", 'i'), 
-                ("particle_birth_time", 'd'), 
-                ('particle_birth_mass', 'd')
-            ]
-        )
-        yt.add_particle_filter(
-            ptype,
-            function=lambda pfilter, data: data[pfilter.filtered_type, "particle_birth_time"] > 0,
-            requires=["particle_birth_time"],
-            filtered_type="all"
-        )
-        ds.add_particle_filter(ptype)
-        return ds
+
 
 
 class AccretionHistory:
@@ -155,26 +130,21 @@ class AccretionHistory:
             pass
         elif config.code == "GEAR":
             ds.add_field(
-                (self._ptype, "particle_creation_time"),
+                (self._ptype, self._fields["birth_time"]),
                 function=lambda field, data: ds.cosmology.t_from_a(data[self._ptype, 'StarFormationTime']),
                 sampling_type="local",
                 units='Gyr'
             )
-        elif config.code == ["RASMSES", "VINTERGATAN"]:
-            ds.add_field(
-                (self._ptype, "particle_creation_time"),
-                function=lambda field, data: data[self._ptype, "particle_birth_time"],
-                sampling_type="local",
-                units='Gyr'
-            )
+        elif config.code == ["RAMSES", "VINTERGATAN"]:
+            pass
         return ds
     
     def _assign_t_snap(self, particle_creation_times):
         """Assigns the closest snapshot to each of the times
         """
         snapshot_ids = self.equiv["snapshot"].values
-        mask = np.isin(self.mergertree.PrincipalLeaf["Snapshot"], self.equiv["snapshot"].values)
-        snapshot_times = self.mergertree.PrincipalLeaf["Time"].values[mask]
+        mask = np.isin(np.sort(self.mergertree.CompleteTree["Snapshot"].unique()), self.equiv["snapshot"].values)
+        snapshot_times = np.sort(self.mergertree.CompleteTree["Time"].unique())[mask]
         earliest_snapshot = self.equiv["snapshot"].min()
         lower_bound = self.equiv["time"].min()
         
@@ -240,7 +210,7 @@ class AccretionHistory:
                 indices = []
             return indices
     
-    def select_accreted_particles(self, subtree, ptype, z=None, t=None, indices=None, **kwargs):
+    def select_accreted_particles(self, subtree, ptype, fields, z=None, t=None, indices=None, **kwargs):
         """
         Creates Accretion History of the halo identified with subtree, starting from z/t and
         going backwards.
@@ -256,7 +226,17 @@ class AccretionHistory:
         t : float w/units, optional
             Starting time. Def: t=tmax(=zmin).
         """
-        self._ptype = ptype        
+        self._ptype = ptype    
+        self._fields = {}
+        self._fields["position"] = fields.get("position", "particle_position")
+        self._fields["velocity"] = fields.get("velocity", "particle_velocity")
+        self._fields["index"] = fields.get("index", "particle_index")
+        for k, v in fields.items():
+            self._fields[k] = v
+
+
+
+        
         if (subtree in ["na", "NA"]) or (subtree is None): 
             subtree_table = self.mergertree.subtree(self.mergertree.principal_subid)
         else: 
@@ -281,7 +261,6 @@ class AccretionHistory:
         else:
             halo_params = self.mergertree.get_halo_params(subtree, snapshot=snap)
             
-        #ds = self.ts[index]
         ds = custom_load(self._files[index], self._ptype)
         ds = self._add_creation_time(ds)
 
@@ -291,16 +270,17 @@ class AccretionHistory:
             sp = ds.sphere(halo_params["center"], kwargs.get("rfac", 1) * halo_params["rvir"])
             
         if indices is None:
-            self.particle_indexes = sp[self._ptype, "particle_index"].value.astype(int)
-            mask = np.isin(sp[self._ptype, "particle_index"], self.particle_indexes)
+            self.particle_indexes = sp[self._ptype, self._fields["index"]].value.astype(int)
+            mask = np.isin(sp[self._ptype, self._fields["index"]], self.particle_indexes)
             assert not False in mask, "Something went wrong!"
         else:
             self.particle_indexes = indices.astype(int)
-            mask = np.isin(sp[self._ptype, "particle_index"], self.particle_indexes)
+            mask = np.isin(sp[self._ptype, self._fields["index"]], self.particle_indexes)
             
         self.npart = len(self.particle_indexes)
-        self.creation_times = sp[self._ptype, "particle_creation_time"][mask].to("Gyr")
+        self.creation_times = sp[self._ptype, self._fields["birth_time"]][mask].to("Gyr")
         self.snapshot_creation_times = self._assign_t_snap(self.creation_times.value)
+
         
         if np.log2(self.particle_indexes.max()) < 16:
             self._type_list["particle_index"] = np.uint16
@@ -311,7 +291,7 @@ class AccretionHistory:
 
             
         self.snap_particle_dict = {
-            snap : self.particle_indexes[self.snapshot_creation_times == snap]
+            int(snap) : self.particle_indexes[self.snapshot_creation_times == snap].astype(self._type_list["particle_index"])
             for snap in np.sort(np.unique(self.snapshot_creation_times))
         }
         if not _check_particle_uniqueness(self.snap_particle_dict):
@@ -319,7 +299,7 @@ class AccretionHistory:
             self.snap_particle_dict = _remove_duplicates(self.snap_particle_dict)
             
         self.time_particle_dict = {
-            snap : self.creation_times[np.isin(self.particle_indexes, indices)]
+            int(snap) : self.creation_times[np.isin(self.particle_indexes, indices)]
             for snap, indices in tqdm(self.snap_particle_dict.items(), total=len(np.unique(self.snap_particle_dict.keys())), desc="Finding birht of stars...")
         }
         del ds, sp, mask, subtree_table
@@ -327,7 +307,7 @@ class AccretionHistory:
         return self.snap_particle_dict
 
     
-    def create_accretion_history(self, subtree, ptype, z=None, t=None, indices=None, mode="bipartite", **kwargs):
+    def create_accretion_history(self, subtree, ptype, fields, z=None, t=None, indices=None, mode="bipartite", **kwargs):
         """
         Creates Accretion History of the halo identified with subtree, starting from z/t and
         going backwards
@@ -344,8 +324,10 @@ class AccretionHistory:
 
         self.accretion_id = subtree
         self._snap_particles = {}
-        self.select_accreted_particles(subtree, ptype, z=z, t=t, indices=indices, **kwargs)
-        
+        self.select_accreted_particles(subtree, ptype, fields, z=z, t=t, indices=indices, **kwargs)
+
+        if "type_list" in kwargs:
+            slf._type_list = kwargs.get("type_list")
         if kwargs.get("verbose", False):
             print(f"Number of particles selected: {self.particle_indexes.shape[0]}")
 
@@ -376,6 +358,7 @@ class AccretionHistory:
                     self.born_between(snapshot) if trajectories else self.born_ids(snapshot),
                     self.mergertree,
                     self._ptype,
+                    self._fields,
                     self._files,
                     mode,
                     **kwargs
@@ -386,7 +369,9 @@ class AccretionHistory:
                 )
                 if trajectories and trajectory_mode in ["delta", "delta-filter"]:
                     self._snap_particles[snapshot] = self._delta_fitering(snapshot)
-
+                    if verbose:
+                        print("Applying delta filter...")
+                        
                 if verbose:
                     print(f"{self._snap_particles[snapshot].memory_usage(deep=True)/1E6} MB")
                     print(self._snap_particles[snapshot].head())
@@ -410,6 +395,7 @@ class AccretionHistory:
                     particle_indexes,
                     self.mergertree,
                     self._ptype,
+                    self._fields,
                     self._files,
                     mode),
                     kwargs
@@ -428,6 +414,8 @@ class AccretionHistory:
 
                 if trajectories and trajectory_mode in ["delta", "delta-filter"]:
                     self._snap_particles[snapshot] = self._delta_fitering(snapshot)
+                    if verbose:
+                        print("Applying delta filter...")
 
                 if verbose:
                     print(f"{self._snap_particles[snapshot].memory_usage(deep=True)/1E6} MB")
@@ -551,35 +539,29 @@ class AccretionHistory:
         return  reconstructed_snap[reconstructed_snap["Sub_tree_id"] == subtree]
 
     
-    def reduce_accretion(self):
+
+    def reduce_accretion(self, endsnap=None, filter=True, **kwargs):
         """
-        For each particle in self.accreted_particles that ultimately ends up in
-        self.accretion_id (or –1 treated as the same), find the last subtree it
-        occupied *before* that final accretion into main/–1.
-    
-        Returns
-        -------
-        pd.DataFrame
-          Columns: ['particle_index','preceding_subtree']
-          One row per unique particle in self.accreted_particles.
+        Like original reduce_accretion, but only restricts to snapshots ≤ endsnap;
+        keeps all particles (even those not yet in main/-1).
         """
         main = self.accretion_id
-        df = self.accreted_particles[['particle_index','Snapshot','Sub_tree_id']]
+        df = _persistence_filter(self.accreted_particles, dt_thresh=kwargs.get("dt_thresh", 0.1))
+        if endsnap is not None:
+            df = df[df['Snapshot'] <= endsnap]
     
-        # 1) Identify "final" states: main_subtree or -1
+        # 1) non-final events
         finals = {main, -1}
-        
-        # 2) All events *not* in finals—these are candidate preceding states
         nonfinal = df[~df['Sub_tree_id'].isin(finals)]
-        
-        # 3) For each particle, find the *last* non-final snapshot (if any)
+    
+        # 2) last non-final snapshot per particle
         last_nf = (
             nonfinal
             .groupby('particle_index', as_index=False)
             .agg(last_snap=('Snapshot','max'))
         )
-        
-        # 4) Pull out the subtree at that last non-final snapshot
+    
+        # 3) pull subtree at that snapshot
         if not last_nf.empty:
             last_nf = last_nf.merge(
                 df,
@@ -588,45 +570,43 @@ class AccretionHistory:
                 how='left'
             )
             preceding_nf = last_nf[['particle_index','Sub_tree_id']]\
-                .rename(columns={'Sub_tree_id':'preceding_subtree'})
+                            .rename(columns={'Sub_tree_id':'preceding_subtree'})
         else:
             preceding_nf = pd.DataFrame(columns=['particle_index','preceding_subtree'])
-        
-        # 5) Particles that never had a non-final event:
-        all_pids = df['particle_index'].unique()
-        pids_with_nf = preceding_nf['particle_index'].unique()
-        pids_only_finals = np.setdiff1d(all_pids, pids_with_nf, assume_unique=True)
-        
-        if len(pids_only_finals):
-            # 6) For those, look at their *first* event (birth):
+    
+        # 4) those with no non-final => look at birth
+        all_pids     = df['particle_index'].unique()
+        pids_nf      = preceding_nf['particle_index'].unique()
+        only_finals  = np.setdiff1d(all_pids, pids_nf, assume_unique=True)
+        if only_finals.size:
             birth = (
-                df[df['particle_index'].isin(pids_only_finals)]
+                df[df['particle_index'].isin(only_finals)]
                 .sort_values(['particle_index','Snapshot'])
                 .groupby('particle_index', as_index=False)
                 .first()
             )
-            # 7) If born unbound (-1) → preceding = -1, else → preceding = main
             birth['preceding_subtree'] = np.where(
-                birth['Sub_tree_id'] == -1,
-                -1,
-                main
+                birth['Sub_tree_id']==-1, -1, main
             )
             preceding_birth = birth[['particle_index','preceding_subtree']]
         else:
             preceding_birth = pd.DataFrame(columns=['particle_index','preceding_subtree'])
-        
-        # 8) Combine and return
+    
+        # 5) combine and count
         result = pd.concat([preceding_nf, preceding_birth], ignore_index=True)
-        # ensure one row per particle:
-        result = result.drop_duplicates('particle_index', keep='first').reset_index(drop=True)
-        
-        counts_df = (
+        result = result.drop_duplicates('particle_index').reset_index(drop=True)
+        counts = (
             result
             .groupby('preceding_subtree', as_index=False)
             .size()
             .rename(columns={'preceding_subtree':'Sub_tree_id','size':'npart'})
         )
-        return result, counts_df
+    
+        return result, counts
+
+
+
+
 
 
     def save(self, name, format="hdf5", **kwargs):
@@ -677,12 +657,127 @@ class AccretionHistory:
 
 
 
+def _persistence_filter(df, dt_thresh=0.1):
+    """
+    On a *delta-filtered* accretion history (one row per particle-subtree change),
+    drop any change whose duration (time until the next change) is < dt_thresh,
+    *and* whose time since the previous change is also < dt_thresh*.
+
+    That removes tiny spurious hops in and out of a subtree.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must have columns ['particle_index','Time','Sub_tree_id'], sorted.
+    dt_thresh : float
+        Threshold in the same units as `Time`.
+
+    Returns
+    -------
+    pd.DataFrame
+        A filtered subset of `df`, with those blips removed.
+    """
+    # 1) For each particle, compute time to previous and next change
+    df = df.sort_values(['particle_index','Time']).reset_index(drop=True)
+
+    grp = df.groupby("particle_index", sort=False)
+
+    # shift forward/backward
+    next_t = grp["Time"].shift(-1)
+
+    # compute deltas
+    dt_after  = next_t - df["Time"]
+
+    # first/last event: treat missing dt as +inf so they never get dropped
+    dt_after.fillna( np.inf, inplace=True)
+
+    # 2) keep only rows where NOT (both sides < threshold)
+    keep = ~((dt_after < dt_thresh))
+
+    # 3) return filtered DataFrame
+    return df.loc[keep].sort_values(['Snapshot']).reset_index(drop=True)
 
 
 
 
 
 
+#    def reduce_accretion(self):
+#        """
+#        For each particle in self.accreted_particles that ultimately ends up in
+#        self.accretion_id (or –1 treated as the same), find the last subtree it
+#        occupied *before* that final accretion into main/–1.
+#    
+#        Returns
+#        -------
+#        pd.DataFrame
+#          Columns: ['particle_index','preceding_subtree']
+#          One row per unique particle in self.accreted_particles.
+#        """
+#        main = self.accretion_id
+#        df = self.accreted_particles[['particle_index','Snapshot','Sub_tree_id']]
+    
+#        # 1) Identify "final" states: main_subtree or -1
+#        finals = {main, -1}
+        
+#        # 2) All events *not* in finals—these are candidate preceding states
+#        nonfinal = df[~df['Sub_tree_id'].isin(finals)]
+        
+        # 3) For each particle, find the *last* non-final snapshot (if any)
+#        last_nf = (
+#            nonfinal
+#            .groupby('particle_index', as_index=False)
+#            .agg(last_snap=('Snapshot','max'))
+#        )
+        
+        # 4) Pull out the subtree at that last non-final snapshot
+#        if not last_nf.empty:
+#            last_nf = last_nf.merge(
+#                df,
+#                left_on=['particle_index','last_snap'],
+#                right_on=['particle_index','Snapshot'],
+#                how='left'
+#            )
+#            preceding_nf = last_nf[['particle_index','Sub_tree_id']]\
+#                .rename(columns={'Sub_tree_id':'preceding_subtree'})
+#        else:
+#            preceding_nf = pd.DataFrame(columns=['particle_index','preceding_subtree'])
+        
+        # 5) Particles that never had a non-final event:
+#        all_pids = df['particle_index'].unique()
+#        pids_with_nf = preceding_nf['particle_index'].unique()
+#        pids_only_finals = np.setdiff1d(all_pids, pids_with_nf, assume_unique=True)
+        
+#        if len(pids_only_finals):
+            # 6) For those, look at their *first* event (birth):
+#            birth = (
+#                df[df['particle_index'].isin(pids_only_finals)]
+#                .sort_values(['particle_index','Snapshot'])
+#                .groupby('particle_index', as_index=False)
+#                .first()
+#            )
+            # 7) If born unbound (-1) → preceding = -1, else → preceding = main
+#            birth['preceding_subtree'] = np.where(
+#                birth['Sub_tree_id'] == -1,
+#                -1,
+#                main
+#            )
+#            preceding_birth = birth[['particle_index','preceding_subtree']]
+#        else:
+#            preceding_birth = pd.DataFrame(columns=['particle_index','preceding_subtree'])
+        
+        # 8) Combine and return
+#        result = pd.concat([preceding_nf, preceding_birth], ignore_index=True)
+        # ensure one row per particle:
+#        result = result.drop_duplicates('particle_index', keep='first').reset_index(drop=True)
+        
+#        counts_df = (
+#            result
+#            .groupby('preceding_subtree', as_index=False)
+#            .size()
+#            .rename(columns={'preceding_subtree':'Sub_tree_id','size':'npart'})
+#        )
+#        return result, counts_df
         
             
         
@@ -690,52 +785,6 @@ class AccretionHistory:
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # def reduce_accretion(self):
-    #     """
-    #     For each particle whose last recorded Sub_tree_id == main_subtree,
-    #     find the Sub_tree_id it occupied just before merging into main_subtree.
-    
-    #     Returns
-    #     -------
-    #     pd.DataFrame
-    #         Columns: ['particle_index', 'preceding_subtree']
-    #     """
-    #     main_subtree =  self.accretion_id
-    #     df = self.accreted_particles
-    
-    #     # 1) Sort by particle and snapshot so we can shift correctly
-    #     df_sorted = df.sort_values(['particle_index','Snapshot'], ignore_index=True)
-    
-    #     # 2) Compute the "previous subtree" for each event
-    #     prev_sub = df_sorted.groupby('particle_index')['Sub_tree_id'].shift(1)
-    
-    #     # 3) Identify the rows where a particle enters main_subtree
-    #     mask_merge = df_sorted['Sub_tree_id'] == main_subtree
-    #     df_merge = df_sorted.loc[mask_merge, ['particle_index']].copy()
-    
-    #     # 4) For each of those, grab its preceding subtree (or main_subtree if none)
-    #     df_merge['preceding_subtree'] = (
-    #         prev_sub[mask_merge]
-    #         .fillna(main_subtree)                 # if no prior, use main_subtree itself
-    #         .astype(df_sorted['Sub_tree_id'].dtype)
-    #         .values
-    #     )
-    
-    #     return df_merge.reset_index(drop=True)
 
 
 
