@@ -3,8 +3,8 @@ import warnings
 import numpy as np
 from tqdm import tqdm
 from copy import copy
-from pNbody.Mockimgs import luminosities
 
+from scipy.optimize import root_scalar
 from scipy.stats import binned_statistic
 
 from .class_methods import half_mass_radius, refine_6Dcenter, easy_los_velocity, gram_schmidt, vectorized_base_change
@@ -12,41 +12,131 @@ from .class_methods import density_profile as densprof
 from .class_methods import velocity_profile as velprof
 from .class_methods import softmax
 
+def rs_klypin(mvir, rvir, vmax):
+    """Computes the scale radius of the dark matter halo using the approach described in Behroozi et al. 2011
+    """
+    f = lambda x: np.log(1 + x) - x / (1 + x)
+    alpha = (vmax**2 * rvir) / (4.300917270038e-06 * mvir)
+    g = lambda c: c / f(c) * f(2.1626) / 2.1626 - alpha
+    
+    conc_sweep = np.linspace(1, 1000000, 1000000)
+    g_sweep = g(conc_sweep)
+    
+    max_indices, min_indices = np.where(g_sweep < 0)[0],  np.where(g_sweep > 0)[0]
+    max_index, min_index = max_indices[-1] if max_indices.size > 0 else -1, min_indices[-1] if min_indices.size > 0 else -1
+    neg_g, pos_g = conc_sweep[max_index], conc_sweep[min_index]
+    
+    conc_zero = root_scalar(g, method="brentq", bracket=[min(neg_g, pos_g), max(neg_g, pos_g)])
+    conc = conc_zero.root
+    rs = rvir / conc
+    return rs
+
+
+def local_velocity_dispersion(pos, vel, **kwargs):
+    """Computes the local 3D velocity dispersion for each member particle as the dispersion of the
+    min(0.1 * Np, 7) nearest particles in 6D phase space. The metric reads:
+
+                    Dij = |x_i - x_j|^2 + w_v*|v_i - v_j|^2
+                    
+    where w_v=sigma_pos^i / sigma_vel^i (where i is [x,y,z]).
+
+    Parameters
+    ----------
+    pos, vel : unyt_array-like
+        Position and velocity of member particles.
+    - kwargs 
+        centered : bool
+            Whether the positions and velocities are corrected for center. Def: False.
+        parallel : bool
+            Whether to parallelize scipy.KDTREE. Def: False (might interfere with other parallelization).
+        halo_params : dict[unyt_object]
+            Dictionary containing center and center_vel keys. Required for non centered data. Def: None.
+
+    Returns
+    -------
+    local_disp : unyt_array-like
+        Local velocity dispersion for each particle, with units of vel.
+    """
+    from scipy.spatial import KDTree
+
+    if not kwargs.get("centered", False):
+        halo_params = kwargs.get("halo_params", None)
+        assert halo_params is not None, "If data is not centered, you should provide halo params kwarg!"
+        halo_center = halo_params['center'].to(pos.units)
+        halo_center_vel = halo_params['center_vel'].to(vel.units)
+        halorel_positions = pos - halo_center
+        halorel_velocities = vel - halo_center_vel
+    else:
+        halorel_positions = pos
+        halorel_velocities = vel
+
+
+    n = int(max(0.01 * halorel_positions.shape[0], 7))
+        
+    wi = np.std(halorel_velocities, axis=0) / np.std(halorel_positions, axis=0)
+    wi = wi.to(halorel_velocities.units / halorel_positions.units)
+
+    halorel_velpos = halorel_velocities / wi
+    assert halorel_velpos.units == halorel_positions.units
+
+    data = np.zeros((halorel_positions.shape[0], halorel_positions.shape[1] * 2), dtype=float) * halorel_positions.units
+    data[:, 0:3] = halorel_positions
+    data[:, 3:] = halorel_velpos
+
+    if kwargs.get("verbose", False):
+        print(f"n: {n}")
+        print(f"wi: {wi}")
+        print(f"data:")
+        print(f"{data}")
+        
+    kdtree = KDTree(data)
+    _, i = kdtree.query(data, k=n, workers=-1 if kwargs.get("parallel", False) else 1)
+    local_disp = -1 * np.ones((halorel_positions.shape[0],), dtype=float) * halorel_velocities.units
+    for k, neighbour_index in enumerate(i):
+        assert neighbour_index.shape[0] == n, "Wrong dimensions buddy!"
+        assert neighbour_index.ndim == 1, "Wrong number of dimensions buddy!"
+        local_disp[k] = np.linalg.norm(np.std(halorel_velocities[neighbour_index], axis=0)) 
+
+    return local_disp
+
+
+
+
 def _collapse_to_longest_true(arr):
     """
-    Given a boolean array, returns a new array where only the longest contiguous block 
+    Given a boolean array, returns a new array where only the longest contiguous block
     of True values is preserved, and all other True values are set to False.
-    
+
     This function pads the array and uses np.diff to locate transitions.
     """
     arr = np.asarray(arr, dtype=bool)
-    
+
     # If there are no True values, just return a copy.
     if not arr.any():
         return arr.copy()
-    
+
     # Pad the array with False at both ends.
     padded = np.r_[False, arr, False]
-    
+
     # Compute the differences between consecutive elements.
     # When converting booleans to int: False->0, True->1.
     d = np.diff(padded.astype(int))
-    
+
     # A diff of 1 indicates a transition from False to True: these are our start indices.
     starts = np.where(d == 1)[0]
-    
+
     # A diff of -1 indicates a transition from True to False: these are our end indices.
     # Since we padded on the left, subtract 1 to map back to original array indices.
     ends = np.where(d == -1)[0] - 1
-    
+
     # Compute the lengths of each contiguous True block.
     lengths = ends - starts + 1
-    
+
     # Identify the block with the maximum length.
     max_idx = np.argmax(lengths)
     longest_start = starts[max_idx]
     longest_end = ends[max_idx]
-    
+
     # Build a new array: set only the indices between longest_start and longest_end to True.
     new_arr = np.zeros_like(arr, dtype=bool)
     new_arr[longest_start:longest_end+1] = True
@@ -54,39 +144,39 @@ def _collapse_to_longest_true(arr):
 
 
 
-def refined_center6d(self, 
+def refined_center6d(self,
                      ptype,
                      method="adaptative",
                      **kwargs
                     ):
-    """Refined center-of-mass position and velocity estimation. 
+    """Refined center-of-mass position and velocity estimation.
 
     The center of mass of a particle distribution is not well estimated by the full particle ensemble, since the outermost particles
     must not be distributed symmetrically around the TRUE center of mass. For that reason, a closer-to-truth value for th CM can be
     obtained by disregarding these outermost particles.
-    
-    Here we implement four methods in which a more refined CM estimation can be obtained. All of them avoid using gravitational 
+
+    Here we implement four methods in which a more refined CM estimation can be obtained. All of them avoid using gravitational
     porentials, as these are not available to observers. Only positions and masses (analogous to luminosities in some sense)
     are used:
-        
-        1. RADIAL-CUT: Discard all particles outside of rshell = rc_scale * rmax. 
+
+        1. RADIAL-CUT: Discard all particles outside of rshell = rc_scale * rmax.
         2. SHRINK-SPHERE: An iterative version of the SIMPLE method, where rshell decreases in steps, with rshell_i+1 = alpha*rshell_i,
                    until an speficief minimun number of particles nmin is reached. Adapted from Pwer et al. 2003.
         3. FRAC-MASS: A variant of the RADIAL-CUT method. Here the cut is done in mass instead of radius. The user can specify a
-                   X-mass-fraction and the X-mass radius and its center are computed iterativelly unitl convergence. 
+                   X-mass-fraction and the X-mass radius and its center are computed iterativelly unitl convergence.
         4. ADAPTATIVE: Performs `SHRINK-SPHERE` if the number of particles is larger than 2*nmin. Otherwise: `RADIAL-CUT`.
 
-    The last radius; r_last, trace of cm positions; trace_cm, number of iterations; iters and final numper of particles; n_particles 
+    The last radius; r_last, trace of cm positions; trace_cm, number of iterations; iters and final numper of particles; n_particles
     are stored alongside the center-of-mass.
-    
+
     Center-of-mass velocity estimation is done is done with particles inside v_scale * r_last.
-    
+
     OPTIONAL Parameters
     -------------------
 
     method : str, optional
         Method with which to refine the CoM: radial-cut/rcc, shrink-sphere/ssc, fractional-mass/mfc od adaptative. Default: ADAPTATIVE
-        
+
     rc_scaling : float
         rshell/rmax for radial-cut method. Must be between 0 and 1. Default: 0.5.
     alpha : float
@@ -97,7 +187,7 @@ def refined_center6d(self,
         Mass-fraction for fractional-mass method. Default: 0.3.
     v_scale : float
         Last Radius scale-factor for velocity estimation. Default: 1.5.
-        
+
     Returns
     -------
     cm, vcm : array
@@ -107,27 +197,27 @@ def refined_center6d(self,
         bound_mask = self[ptype, "total_energy"] < 0
         f = 0.1 if "f" not in kwargs.keys() else kwargs["f"]
         nbound = 32 if "nbound" not in kwargs.keys() else kwargs["nbound"]
-        
+
         N = int(np.rint(np.minimum(f * np.count_nonzero(bound_mask), nbound)))
         most_bound_ids = np.argsort(self[ptype, "total_energy"])[:N]
         most_bound_mask = np.zeros(len(self[ptype, "total_energy"]), dtype=bool)
         most_bound_mask[most_bound_ids] = True
-        
+
         tmp_cm = np.average(self[ptype, "coords"][most_bound_mask], axis=0, weights=self[ptype, "mass"][most_bound_mask])
-        tmp_vcm = np.average(self[ptype, "velocity"][most_bound_mask], axis=0, weights=self[ptype, "mass"][most_bound_mask]) 
-        
+        tmp_vcm = np.average(self[ptype, "velocity"][most_bound_mask], axis=0, weights=self[ptype, "mass"][most_bound_mask])
+
     elif method.lower() == "pot-softmax":
         bound_mask = self[ptype, "total_energy"] < 0
         T = "adaptative" if "T" not in kwargs.keys() else kwargs["T"]
-        
+
         w = self[ptype, "total_energy"][bound_mask]/self[ptype, "total_energy"][bound_mask].min()
         if T == "adaptative":
             T = np.abs(self[ptype, "kinetic_energy"][bound_mask].mean()/self[ptype, "total_energy"][bound_mask].min())
-            
+
         tmp_cm = np.average(self[ptype, "coordinates"][bound_mask], axis=0, weights=softmax(w, T))
         tmp_vcm = np.average(self[ptype, "velocity"][bound_mask], axis=0, weights=softmax(w, T))
-    
-    else:                
+
+    else:
         centering_results = refine_6Dcenter(
             self[ptype, "coordinates"],
             self[ptype, "mass"],
@@ -142,26 +232,26 @@ def refined_center6d(self,
     dq = {}
     dq["cm"] = tmp_cm
     dq["vcm"] = tmp_vcm
-    
+
     return tmp_cm, tmp_vcm
 
 
 
 def Xmass_radius(self, ptype, cm, mfrac=0.5, lines_of_sight=None, project=False, light=False):
-    """By default, it computes 3D half mass radius of a given particle ensemble. If the center of the particles 
+    """By default, it computes 3D half mass radius of a given particle ensemble. If the center of the particles
     is not provided, it is estimated by first finding the median of positions and then computing a refined CoM using
     only the particles inside r < 0.5*rmax.
-    
-    There is also an argument to compute other ALPHA_mass_radius of an arbitrary mass fraction. The desired ALPHA_mass_radius  
+
+    There is also an argument to compute other ALPHA_mass_radius of an arbitrary mass fraction. The desired ALPHA_mass_radius
     is computed via rootfinding using scipy's implementation of brentq method.
-    
+
     OPTIONAL Parameters
     -------------------
     mfrac : float
         Mass fraction of desired radius. Default: 0.5 (half, mass radius).
     project: bool
         Whether to compute projected quantity or not.
-    
+
     Returns
     -------
     MFRAC_mass_radius : float
@@ -184,12 +274,12 @@ def Xmass_radius(self, ptype, cm, mfrac=0.5, lines_of_sight=None, project=False,
         gs = gram_schmidt(los)
         new_coords = vectorized_base_change(np.linalg.inv(gs), self[ptype, "coordinates"])
         new_cm = np.linalg.inv(gs) @ cm
-        
+
         tmp_rh_arr[i] = half_mass_radius(
-            new_coords, 
-            self[ptype, "mass"] if light is False else self[ptype, "luminosity"], 
-            new_cm, 
-            mfrac, 
+            new_coords,
+            self[ptype, "mass"] if light is False else self[ptype, "luminosity"],
+            new_cm,
+            mfrac,
             project=project
         )
 
@@ -212,10 +302,10 @@ def cumulative_mass(self, ptype, cm, bins=None):
     cumulative_npart = np.cumsum(npart)
     e_cumulative_mass = cumulative_mass / np.sqrt(cumulative_npart)
     bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
-    
+
     return {
-        'encmass': cumulative_mass * masses.units, 
-        'radii': bin_centers * radii.units, 
+        'encmass': cumulative_mass * masses.units,
+        'radii': bin_centers * radii.units,
         'e_encmass': e_cumulative_mass * masses.units
     }
 
@@ -227,13 +317,13 @@ def fit_cumulative(radii, encmass, e_encmass, model="king", **kwargs):
     from lmfit import Model, Parameters, fit_report
 
     def LIMInterp(r, W0, g, M, rh, ra):
-        """Produces a sample of a Lowered isothermal model with parameters W0, g, M and rh using LIMEPY 
+        """Produces a sample of a Lowered isothermal model with parameters W0, g, M and rh using LIMEPY
         and interpolates the result for a specified r.
         """
         k = limepy(phi0=W0, g=g, M=M, rh=rh, ra=ra, G=4.300917270038e-06, project=True, ode_atol=1E-10, ode_rtol=1E-10)
         evals = np.interp(r, xp=k.r, fp=k.mc)
-        return evals 
-    
+        return evals
+
     if model=="king":
         g, W = 1, 5
     elif model=="plummer":
@@ -255,10 +345,10 @@ def fit_cumulative(radii, encmass, e_encmass, model="king", **kwargs):
     result = densModel.fit(
         r=radii,
         data=encmass,
-        params=fit_params, 
+        params=fit_params,
         weights=1/e_encmass,
         nan_policy="omit"
-    ) 
+    )
 
     k = limepy(
         phi0=result.params["W0"],
@@ -267,7 +357,7 @@ def fit_cumulative(radii, encmass, e_encmass, model="king", **kwargs):
         rh=result.params["rh"],
         ra=result.params["ra"],
         G=4.300917270038e-06,
-        ode_atol=kwargs.get("ode_atol", 1E-13), 
+        ode_atol=kwargs.get("ode_atol", 1E-13),
         ode_rtol=kwargs.get("ode_rtol", 1E-13),
         project=True
     )
@@ -282,8 +372,8 @@ def Slope_radius(self, ptype, cm, bins=None, model="plummer", log_slope=-3, meth
     from scipy.optimize import root_scalar
     profile = cumulative_mass(self, ptype, cm, bins=bins)
     limepy_model, result = fit_cumulative(
-        profile["radii"], 
-        profile["encmass"], 
+        profile["radii"],
+        profile["encmass"],
         profile["e_encmass"],
         model=model,
         **kwargs
@@ -293,23 +383,23 @@ def Slope_radius(self, ptype, cm, bins=None, model="plummer", log_slope=-3, meth
     window = kwargs.get("window", int(min(5, 0.1 * limepy_model.nstep)) )
 
     if method == "cumulative":
-        grad = np.convolve( 
+        grad = np.convolve(
             np.gradient(limepy_model.mc, limepy_model.r, edge_order=2),
             np.ones(window) / window,
             mode="same"
         )
-        dgrad1 = np.convolve( 
+        dgrad1 = np.convolve(
             np.gradient(np.log10(grad), np.log10(limepy_model.r), edge_order=2),
             np.ones(window) / window,
             mode="same"
-        )  
+        )
         p = 2
     elif method == "density":
-        dgrad1 = np.convolve( 
+        dgrad1 = np.convolve(
             np.gradient(np.log10(limepy_model.rho), np.log10(limepy_model.r), edge_order=2),
             np.ones(window) / window,
             mode="same"
-        )    
+        )
         p = 0
 
 
@@ -329,7 +419,7 @@ def Slope_radius(self, ptype, cm, bins=None, model="plummer", log_slope=-3, meth
         "r": limepy_model.r,
         "log_grad": dgrad1
     }
-    
+
 
 
 
@@ -349,7 +439,7 @@ def los_dispersion_old(self, ptype, cm, lines_of_sight, rcyl):
     -------
     stdvel : unyt_quantity
     los_velocities : unyt_array
-    """                
+    """
     if np.array(lines_of_sight).ndim == 1:
         lines_of_sight = np.array([lines_of_sight])
     elif np.array(lines_of_sight).ndim == 2:
@@ -382,11 +472,11 @@ def los_dispersion(self, ptype, lines_of_sight=[[1,0,0], [0,1,0], [0,0,1]], rcyl
     -------
     stdvel : unyt_quantity
     los_velocities : unyt_array
-    """    
+    """
     from photutils.aperture import CircularAperture, aperture_photometry
     from galexquared.utils import create_sph_dataset
 
-    
+
     if np.array(lines_of_sight).ndim == 1:
         lines_of_sight = np.array([lines_of_sight])
     elif np.array(lines_of_sight).ndim == 2:
@@ -433,7 +523,7 @@ def los_dispersion(self, ptype, lines_of_sight=[[1,0,0], [0,1,0], [0,0,1]], rcyl
         size = (np.array(dispersion.width) * dispersion.width[0].units).to("kpc")
         pix_to_kpc = size / buff
         center = buff / 2
-            
+
         rp = (rcyl / np.sqrt(pix_to_kpc[0] * pix_to_kpc[1])).to("").value
         surflum = yt.ProjectionPlot(
             ds_sph,
@@ -444,7 +534,7 @@ def los_dispersion(self, ptype, lines_of_sight=[[1,0,0], [0,1,0], [0,0,1]], rcyl
             center=cen,
             width=width
         )
-        
+
         vlos = dispersion.to_fits_data(("io", "particle_velocity_los")).get_data("particle_velocity_los_stddev").to("km/s").value
         lum = surflum.to_fits_data(("io", "lumdens_V")).get_data("lumdens_V").to("Lsun/kpc**2").value
         weighted_vlos = lum * vlos**2
@@ -452,15 +542,15 @@ def los_dispersion(self, ptype, lines_of_sight=[[1,0,0], [0,1,0], [0,0,1]], rcyl
         xp, yp = center
         positions = [(xp, yp)]
         aperture = CircularAperture(positions, r=float(rp))
-        
+
         phot_table_lum = aperture_photometry(lum, aperture)
         total_lum = phot_table_lum['aperture_sum'][0]
-        
+
         phot_table_weighted = aperture_photometry(weighted_vlos, aperture)
         total_weighted_sigma2 = phot_table_weighted['aperture_sum'][0]
-        
+
         avg_sigma2 = total_weighted_sigma2 / total_lum
-        
+
         tmp_disp_arr[i] = avg_sigma2
 
 
@@ -488,173 +578,9 @@ def enclosed_mass(self, ptype, center, r0):
 
 
 
-def local_velocity_dispersion(pos, vel, **kwargs):
-    """Computes the local 3D velocity dispersion for each member particle as the dispersion of the
-    min(0.1 * Np, 7) nearest particles in 6D phase space. The metric reads:
 
-                    Dij = |x_i - x_j|^2 + w_v*|v_i - v_j|^2
-                    
-    where w_v=sigma_pos^i / sigma_vel^i (where i is [x,y,z]).
 
-    Parameters
-    ----------
-    pos, vel : unyt_array-like
-        Position and velocity of member particles.
-    - kwargs 
-        centered : bool
-            Whether the positions and velocities are corrected for center. Def: False.
-        parallel : bool
-            Whether to parallelize scipy.KDTREE. Def: False (might interfere with other parallelization).
-        halo_params : dict[unyt_object]
-            Dictionary containing center and center_vel keys. Required for non centered data. Def: None.
 
-    Returns
-    -------
-    local_disp : unyt_array-like
-        Local velocity dispersion for each particle, with units of vel.
-    """
-    from scipy.spatial import KDTree
-
-    if not kwargs.get("centered", False):
-        halo_params = kwargs.get("halo_params", None)
-        assert halo_params is not None, "If data is not centered, you should provide halo params kwarg!"
-        halo_center = halo_params['center'].to(pos.units)
-        halo_center_vel = halo_params['center_vel'].to(vel.units)
-        halorel_positions = (pos - halo_center)
-        halorel_velocities = (vel - halo_center_vel)
-    else:
-        halorel_positions = pos
-        halorel_velocities = vel
-
-
-    n = int(max(0.01 * halorel_positions.shape[0], 7))
-        
-    wi = np.std(halorel_velocities, axis=0) / np.std(halorel_positions, axis=0)
-    wi = wi.to(halorel_velocities.units / halorel_positions.units)
-
-    halorel_velpos = halorel_velocities / wi
-    assert halorel_velpos.units == halorel_positions.units
-
-    data = np.zeros((halorel_positions.shape[0], halorel_positions.shape[1] * 2), dtype=float) * halorel_positions.units
-    data[:, 0:3] = halorel_positions
-    data[:, 3:] = halorel_velpos
-
-    if kwargs.get("verbose", False):
-        print(f"n: {n}")
-        print(f"wi: {wi}")
-        print(f"data:")
-        print(f"{data}")
-        
-    kdtree = KDTree(data)
-    _, i = kdtree.query(data, k=n, workers=-1 if kwargs.get("parallel", False) else 1)
-    local_disp = -1 * np.ones((halorel_positions.shape[0],), dtype=float) * halorel_velocities.units
-    for k, neighbour_index in enumerate(i):
-        assert neighbour_index.shape[0] == n, "Wrong dimensions buddy!"
-        assert neighbour_index.ndim == 1, "Wrong number of dimensions buddy!"
-
-        local_disp[k] = np.std( np.linalg.norm(halorel_velocities[neighbour_index], axis=1) ) 
-
-    return local_disp
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
 def density_profile(self,
                     ptype,
                     center,
@@ -677,7 +603,7 @@ def density_profile(self,
         center = center[:2]
 
 
-    
+
     if not np.any(bins):
         radii = np.linalg.norm(pos - center, axis=1)
         rmin, rmax, thicken, nbins = radii.min(), radii.max(), False, 10
@@ -686,11 +612,11 @@ def density_profile(self,
             rmax = rmax if "rmax" not in kwargs["bins_params"].keys() else kwargs["bins_params"]["rmax"]
             thicken = None if "thicken" not in kwargs["bins_params"].keys() else kwargs["bins_params"]["thicken"]
             nbins = 10 if "bins" not in kwargs["bins_params"].keys() else kwargs["bins_params"]["bins"]
-            
+
         bins = np.histogram_bin_edges(
             np.log10(radii),
             bins=nbins,
-            range=np.log10([rmin, rmax]) 
+            range=np.log10([rmin, rmax])
         )
         bins = 10 ** bins
 
@@ -712,7 +638,7 @@ def density_profile(self,
     return result
 
 
-def velocity_profile(self, 
+def velocity_profile(self,
                      ptype,
                      center,
                      v_center,
@@ -754,19 +680,19 @@ def velocity_profile(self,
             rmax = rmax if "rmax" not in kwargs["bins_params"].keys() else kwargs["bins_params"]["rmax"]
             thicken = None if "thicken" not in kwargs["bins_params"].keys() else kwargs["bins_params"]["thicken"]
             nbins = 10 if "bins" not in kwargs["bins_params"].keys() else kwargs["bins_params"]["bins"]
-            
+
         bins = np.histogram_bin_edges(
-            np.log10(radii), 
+            np.log10(radii),
             bins=nbins,
-            range=np.log10([rmin, rmax]) 
+            range=np.log10([rmin, rmax])
         )
         bins = 10 ** bins
-        
+
         if thicken is not None:
             binindex = [i for i in range(len(bins)) if i==0 or i>thicken]
             bins = bins[binindex]
 
-    
+
     if not np.any(project):
         result = velprof(
             pos,
@@ -800,43 +726,8 @@ def velocity_profile(self,
             quantity=quantity
         )
 
-    result["bins"] = bins        
+    result["bins"] = bins
     return result
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

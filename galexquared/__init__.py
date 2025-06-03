@@ -4,10 +4,9 @@ from .orbits import *
 from .accretion import *
 from .tracking import *
 
-from .structure import *
 from .utils import *
 from .config import config
-
+from .structure import *
 
 #from .data_container import DataContainer
 

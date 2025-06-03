@@ -906,7 +906,12 @@ class MergerTree:
 
         
         halo = self.CompleteTree.loc[index]
+        if halo.empty:
+            return None
+            
         halo_params = {
+            "Sub_tree_id": halo["Sub_tree_id"].values[0],
+            "uid": halo["uid"].values[0],
             "redshift": halo["Redshift"].values[0].astype(float),
             "center": unyt_array(halo[["position_x", "position_y", "position_z"]].values[0].astype(float) / (1 + halo["Redshift"].values[0].astype(float)), 'kpc'),
             "center_vel": unyt_array(halo[["velocity_x", "velocity_y", "velocity_z"]].values[0].astype(float), 'km/s'),
