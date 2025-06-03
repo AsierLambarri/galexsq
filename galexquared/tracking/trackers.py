@@ -121,7 +121,7 @@ class GravityTracker(BaseTracker):
         """
         yt.utilities.logger.ytLogger.setLevel(40)
 
-        nproc = min(int(kwargs.get("parallel", 1)), len(inserted_halos))
+        nproc = max( min(int(kwargs.get("parallel", 1)), len(inserted_halos)), 1)
         pool = mp.Pool(nproc)
 
         if nproc > 6: warnings.warn(f"Having nproc={nproc} may fuck up your cache.")
@@ -187,7 +187,7 @@ class GravityTracker(BaseTracker):
         print('\n'.join(stdout))
         yt.utilities.logger.ytLogger.setLevel(20)
 
-        del tasks_prior, tasks_infall, particle_list 
+        del tasks_prior, tasks_infall 
 
 
 
@@ -212,7 +212,7 @@ class GravityTracker(BaseTracker):
         
         self._sanitize_merge_info()
         self._create_snapztdir()
-        self._create_thtrees()
+        #self._create_thtrees()
         
         start_snapst = dict( zip(self.MergeInfo["Sub_tree_id"].values,  self.MergeInfo["Snapshot"].values) )
         file_path = Path(output)
@@ -241,9 +241,15 @@ class GravityTracker(BaseTracker):
             if not active_halos:
                 raise Exception(f"You dont have any active halos at this point! (snapshot {snapshot}). This means that something went wrong!")
             else:
+                pass
+            if inserted_halos:
                 self.ds = yt.load(pdir)
-
-            self._select_particles(inserted_halos, **kwargs)
+            else:
+                pass
+            if inserted_halos:
+                self._select_particles(inserted_halos, **kwargs)
+            else:
+                pass
 
 
             del self.ds
