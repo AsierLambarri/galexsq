@@ -9,7 +9,8 @@ from scipy.spatial import KDTree
 from time import time
 
 from .sparse import _build_triplets_3v, _build_triplets_3d3v, _build_triplets_6dv, _build_covinv_3v, _build_covinv_3d3v, _build_covinv_6d, _greedy_assign
-from ._helpers import potential, custom_load
+from .potentials import potential
+from ._helpers import custom_load
 from ..tracking._helpers import best_dtype
 
 

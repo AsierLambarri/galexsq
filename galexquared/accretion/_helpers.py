@@ -45,25 +45,6 @@ def _remove_duplicates(data):
         new_data[key] = np.array(filtered_list)
     return new_data
 
-def _nfw_potential(r, mvir, rs, c, G):
-    #x = np.clip(r, 0 * 2 * soft, np.inf) / rs
-    x = r / rs
-    A_nfw = np.log(1 + c) - c / (1 + c)
-    return -G * mvir * rs / A_nfw * np.log(1 + x) / x 
-
-def _kepler_potential(r, mvir, G):
-    return  -G * mvir / r
-
-
-def potential(r, mode="kepler", **kwargs):
-    if mode == "kepler":
-        print("USING KEPLER")
-        mvir, G = kwargs["mass"], kwargs["G"]
-        return _kepler_potential(r, mvir, G)
-    if mode == "nfw":
-        print("USING NFW")
-        mvir, rs, c, G = kwargs["mass"], kwargs["rs"], kwargs["c"], kwargs["G"]
-        return _nfw_potential(r, mvir, rs, c, G)
 
 def custom_load(fn, ptype):
     """Loads

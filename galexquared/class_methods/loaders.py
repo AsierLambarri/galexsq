@@ -167,7 +167,7 @@ def parse_filename(filename,
     filename : str 
         Array of filenames.
     pattern : str, optional
-        Patterns that the snapshots follow. Default: r'(?P<basename>.+?)_(?P<number>\d+)(?:\.\d+)?\.(?P<format>\w+)'
+        Patterns that the snapshots follow. Default: 
         Corresponds to ~ basename_number.format.
 
     Returns
@@ -189,14 +189,14 @@ def parse_filename(filename,
 def sort_snaps(file_list, 
                pattern = r"(?P<basename>.+?)_(?P<number>\d+)(?:\.\d+)?\.(?P<format>\w+)"
               ):
-    """Sorts files according to snapnumber using 'parse_filename' function.
+    """Sorts files according to snapnumber using parse_filename function.
 
     Parameters
     ----------
     file_list : array[str]
         List of file names.
     pattern : str, optional
-        Patterns that the snapshots follow. Default: r"(?P<basename>.+?)_(?P<number>\d+)(?:\.\d+)?\.(?P<format>\w+)"
+        Patterns that the snapshots follow. Default: 
         Corresponds to ~ basename_number.format.
 
     Returns
