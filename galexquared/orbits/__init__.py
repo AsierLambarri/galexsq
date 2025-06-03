@@ -4,4 +4,4 @@ from .phase_instant import PhaseSpaceInstant
 from .particle_potential import ParticlePotential
 from .scf_potential import compute_and_filter_scf
 
-from .utils import refind_pericenters_apocenters
+from .utils import refind_pericenters_apocenters, find_closest_times

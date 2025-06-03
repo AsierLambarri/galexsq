@@ -2,7 +2,46 @@ import numpy as np
 from scipy.signal import savgol_filter, find_peaks, argrelextrema, argrelmax, argrelmin, peak_prominences
 from scipy.interpolate import interp1d
 
-def refind_pericenters_apocenters(time, radius, verbose=0):
+
+def find_closest_times(df, timestamp, n=1):
+    """
+    Finds the closest "Time" value to the given timestamp, along with up to
+    n previous and n next "Time" values.
+
+    Parameters:
+        df (pd.DataFrame): DataFrame containing a "Time" column (datetime-like).
+        timestamp (str or pd.Timestamp): The timestamp to find the closest match for.
+        n (int): Number of previous and next points to return.
+
+    Returns:
+        dict: {
+            'closest_time': Timestamp,
+            'previous_times': [up to n Timestamps before closest],
+            'next_times':     [up to n Timestamps after  closest],
+        }
+    """
+    # copy & ensure index is 0…N-1
+    df = df.copy().reset_index(drop=True)
+
+    # Find the closest time index
+    idx_closest = (df['Time'] - timestamp).abs().idxmin()
+
+    # build previous indices (idx_closest-1, -2, …) but >= 0
+    prev_idxs = [i for i in range(idx_closest - n, idx_closest) if i >= 0]
+
+    # build next indices (idx_closest+1, +2, …) but < len
+    next_idxs = [i for i in range(idx_closest + 1, idx_closest + n + 1)
+                 if i < len(df)]
+
+    return {
+        'closest_time':   df.loc[idx_closest, 'Time'],
+        'previous_times': df.loc[prev_idxs, 'Time'].tolist(),
+        'next_times':     df.loc[next_idxs, 'Time'].tolist(),
+    }
+
+
+
+def refind_pericenters_apocenters(time, radius, upsample=1000, window=0.07, poly_order=5, verbose=0):
     """
     Finds the pericenters and apocenters with argrelmax/min and peak_prominence. Prior to this, 
     a savitzky-golay filter is applied to upsampled data, to somewhat remove noise.
@@ -37,26 +76,30 @@ def refind_pericenters_apocenters(time, radius, verbose=0):
     # ---------------------------------------------------------------------
     # Upsample and smooth the data.
     # ---------------------------------------------------------------------
-    t_find = np.linspace(time_phys.min(), time_phys.max(), 1000)
-    cs = interp1d(time_phys, radius_phys)
-                     
-    r_smooth = savgol_filter(
-        cs(t_find), 
-        window_length=int(t_find.shape[0] * 0.07) // 2 * 2 + 1, 
-        polyorder=5
-    )
-    r_find = r_smooth
+    if upsample == 1:
+        r_find = radius_phys
+        t_find = time_phys
+    else:
+        t_find = np.linspace(time_phys.min(), time_phys.max(), upsample)
+        cs = interp1d(time_phys, radius_phys)
+    
+        r_smooth = savgol_filter(
+            cs(t_find), 
+            window_length=int(t_find.shape[0] * window) // 2 * 2 + 1, 
+            polyorder=poly_order
+        )
+        r_find = r_smooth
     
     # ---------------------------------------------------------------------
     # Determine candidate extrema (using argrelmax and argrelmin) and compute prominences.
     # ---------------------------------------------------------------------
     index_max = argrelmax(
         r_find, 
-        order=int(t_find.shape[0] * 0.07 * 0.1) // 2 * 2 + 1,
+        order=int(t_find.shape[0] * window * 0.1) // 2 * 2 + 1,
     )[0]
     index_min = argrelmin(
         r_find, 
-        order=int(t_find.shape[0] * 0.07 * 0.1) // 2 * 2 + 1,
+        order=int(t_find.shape[0] * window * 0.1) // 2 * 2 + 1,
     )[0]
     
     prominences_min = peak_prominences(-r_find, index_min)[0]  
@@ -95,7 +138,7 @@ def refind_pericenters_apocenters(time, radius, verbose=0):
         coeffs = np.polyfit(x_window, y_window, 2)
         return coeffs  # curvature ~ 2*a
 
-    curve_window = int(t_find.shape[0] * 0.07) // 2 * 2 + 1
+    curve_window = int(t_find.shape[0] * window) // 2 * 2 + 1
     # Apply quadratic curvature check for minima (pericenters)
     keep_min_curv = []
     for i in filtered_min_indices:
@@ -192,10 +235,10 @@ def refind_pericenters_apocenters(time, radius, verbose=0):
         print("")
         print("Pericenters:")
         for value in pp["peri"]:
-            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value["coeffs"][0]:.2e}")
+            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value['coeffs'][0]:.2e}")
         print("Apocenters:")
         for value in pp["apo"]:
-            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value["coeffs"][0]:.2e}")
+            print(f"-  t={value['time']:.3f}  r={value['radius']:.3f}  p={value['prominence']:.2f}  a={value['coeffs'][0]:.2e}")
             
 
     return peri_apo, peri_apo_all
