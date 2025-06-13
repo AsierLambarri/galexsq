@@ -43,7 +43,8 @@ def _build_triplets_3v(
         halo_scalings, 
         halo_ids,
         particle_indices, 
-        particle_velocities
+        particle_velocities,
+        nmin
     ):
     """Build sparse matrix (row, col, dist) triplets for Mahalanobis distances.
     """
@@ -52,10 +53,13 @@ def _build_triplets_3v(
     for j, valid in enumerate(candidate_list):
         hoid = halo_ids[j]
         idxs = np.asarray(valid, dtype=int)
-        mask = np.isin(particle_indices, idxs)
         if idxs.size == 0:
             continue
-            
+        mask = np.isin(particle_indices, idxs)
+ 
+        sigma = np.sqrt(idxs.size) * 0.4
+        w = 1 - 1.0 / (1.0 + np.exp(-(idxs.size - nmin) / sigma))
+        
         _, vs = halo_scalings[j]
         _, mu = halo_vel_means[j]
         
@@ -66,6 +70,8 @@ def _build_triplets_3v(
         # Mahalanobis‑squared distance
         # D2    = np.einsum('ij,ij->i', dv.dot(inv), dv)  # (M_j,)
         D2 = np.einsum("ij,ij->i", dv @ inv, dv)
+        A = np.max(D2)
+        D2 += A * w
         
         rows.extend(idxs.tolist())
         cols.extend([hoid] * idxs.size)
@@ -84,17 +90,21 @@ def _build_triplets_3d3v(
         halo_ids,
         particle_indices, 
         particle_positions, 
-        particle_velocities
+        particle_velocities,
+        nmin
     ):
     rows, cols, dists = [], [], []
 
     for j, valid in enumerate(candidate_list):
         hoid = halo_ids[j]
         idxs = np.asarray(valid, dtype=int)
-        mask = np.isin(particle_indices, idxs)
         if idxs.size == 0:
             continue
+        mask = np.isin(particle_indices, idxs)
 
+        sigma = np.sqrt(idxs.size) * 0.4
+        w = 1 - 1.0 / (1.0 + np.exp(-(idxs.size - nmin) / sigma))
+        
         rs, vs = halo_scalings[j]
         mu_pos, mu_vel = halo_means[j]         # two (3,) arrays
         inv_pos, inv_vel = halo_cov_invs[j]    # two (3,3) arrays
@@ -108,12 +118,15 @@ def _build_triplets_3d3v(
         D2_pos = np.einsum("ij,ij->i", dx @ inv_pos, dx)
         D2_vel = np.einsum("ij,ij->i", dv @ inv_vel, dv)
         D2 = 1 * (D2_pos + D2_vel)
-
+        
+        A = np.max(D2)
+        D2 += A * w
+        
         rows.extend(idxs.tolist())
         cols.extend([hoid] * idxs.size)
         dists.extend(D2.tolist())
 
-    return rows, cols, dists #np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32), np.array(dists, dtype=np.float64)
+    return rows, cols, dists 
 
 
     
@@ -126,7 +139,8 @@ def _build_triplets_6dv(
         halo_ids,
         particle_indices, 
         particle_positions, 
-        particle_velocities
+        particle_velocities,
+        nmin
     ):
     rows, cols, dists = [], [], []
 
@@ -134,10 +148,13 @@ def _build_triplets_6dv(
     for j, valid in enumerate(candidate_list):
         hoid = halo_ids[j]
         idxs = np.asarray(valid, dtype=int)
-        mask = np.isin(particle_indices, idxs)
         if idxs.size == 0:
             continue
-
+        mask = np.isin(particle_indices, idxs)
+        
+        sigma = np.sqrt(idxs.size) * 0.4
+        w = 1 - 1.0 / (1.0 + np.exp(-(idxs.size - nmin) / sigma))
+        
         rs, vs = halo_scalings[j]
         mu_pos, mu_vel = halo_means[j]         # two (3,) arrays
         inv = halo_cov_invs[j]    
@@ -150,12 +167,14 @@ def _build_triplets_6dv(
         dx6 = np.hstack((dx, dv))
     
         D2 = np.einsum("ij,ij->i", dx6 @ inv, dx6)
-
+        A = np.max(D2)
+        D2 += A * w
+        
         rows.extend(idxs.tolist())
         cols.extend([hoid] * idxs.size)
         dists.extend(D2.tolist())
 
-    return rows, cols, dists #np.array(rows, dtype=np.int32), np.array(cols, dtype=np.int32), np.array(dists, dtype=np.float64)
+    return rows, cols, dists 
 
 
 

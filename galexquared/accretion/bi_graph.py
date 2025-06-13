@@ -6,6 +6,7 @@ Created on Thu Jun 12 12:01:32 2025
 @author: asier
 """
 import numpy as np
+from collections import Counter
 from collections import defaultdict
 
 from .sparse import _build_triplets_3v, _build_triplets_3d3v, _build_triplets_6dv, _build_covinv_3v, _build_covinv_3d3v, _build_covinv_6d, _greedy_assign
@@ -77,7 +78,27 @@ def find_groups_only_populated(candidates_list, positions, rvirs):
 
     return groups
 
+def total_shared_particles(candidate_list):
+    """
+    Count how many unique particles appear in more than one halo.
 
+    Parameters
+    ----------
+    candidate_list : list of array‑like[int]
+        candidate_list[j] is the list/array of particle IDs for halo j.
+
+    Returns
+    -------
+    int
+        Number of particles that are assigned to two or more halos.
+    """
+    # Flatten all particle IDs and count occurrences
+    counts = Counter()
+    for lst in candidate_list:
+        counts.update(lst)
+
+    # Count how many particles appear in multiple halos
+    return sum(1 for occ in counts.values() if occ > 1)
 
 
 
@@ -94,6 +115,7 @@ class BipartiteGraph:
                  particle_velocities,
                  mode,
                  Dmax=1E7,
+                 nmin=50,
                  regularization=1e-6):
         """
         candidate_list   : list of arrays of particle‐indices for each halo in this subgraph
@@ -117,12 +139,14 @@ class BipartiteGraph:
         self.Dmax      = Dmax
         self.reg       = regularization
 
-        self.nh = len(candidate_list)
-        self.np = particle_positions.shape[0]
-
+        self.nmin = nmin
+        self.nh   = len(candidate_list)
+        self.np   = particle_positions.shape[0]
+        self.shared = total_shared_particles(self.cand_list)
+        
         assert self.nh > 0, "YOUR BIPARTITE GRAPH DOESNT HAVE HALOS!"
 
-    def solve(self, maxiter=5, initial_guess=None):
+    def solve(self, maxiter=7, rtol=0.01, atol=100, initial_guess=None):
         """Solves the bipartite graph matching via greedy assignment.
         """
         if self.nh == 1:
@@ -130,10 +154,16 @@ class BipartiteGraph:
         elif self.np == 0:
             return {}
 
-        for i in range(maxiter):
+        if initial_guess is None:
+            prelim_guess = self.cand_list
+        else:
+            prelim_guess = initial_guess
+
+
+        for it in range(0, maxiter):
             if self.mode in ["3", "3v"]:
                 halo_cov_invs = _build_covinv_3v(
-                    self.cand_list, 
+                    prelim_guess, 
                     self.scales, 
                     self.pid, 
                     self.vel, 
@@ -146,15 +176,17 @@ class BipartiteGraph:
                     self.scales, 
                     self.sub_list,
                     self.pid,
-                    self.vel
+                    self.vel,
+                    self.nmin
                 )
                 
                 
             elif self.mode in ["3d+3v", "3+3"]:
                 halo_cov_invs = _build_covinv_3d3v(
-                    self.cand_list, 
+                    prelim_guess, 
                     self.scales, 
                     self.pid, 
+                    self.pos,
                     self.vel, 
                     self.reg
                 )
@@ -165,50 +197,55 @@ class BipartiteGraph:
                     self.scales, 
                     self.sub_list,
                     self.pid,
-                    self.vel
+                    self.pos,
+                    self.vel,
+                    self.nmin
                 )
                 
             
             elif self.mode in ["6d", "6"]:
                 halo_cov_invs = _build_covinv_6d(
-                    self.cand_list, 
+                    prelim_guess, 
                     self.scales, 
                     self.pid, 
+                    self.pos,
                     self.vel, 
                     self.reg
                 )
-                rows, cols, dists = _build_triplets_6d(
+                rows, cols, dists = _build_triplets_6dv(
                     self.means, 
                     halo_cov_invs, 
                     self.cand_list, 
                     self.scales, 
                     self.sub_list,
                     self.pid,
-                    self.vel
+                    self.pos,
+                    self.vel,
+                    self.nmin
                 )
     
             else:
                 raise Exception("You didnt provide a valid phase space search mode!")
 
-        
-            halo_to_particles = _greedy_assign(rows, cols, dists, self.np, self.Dmax**2)
-            prelim_candi = [halo_to_particles[h] if h in halo_to_particles else [] for h in self.sub_list]
+    
+            halo_to_particles = _greedy_assign(np.array(rows), np.array(cols), np.array(dists), self.np, self.Dmax**2)
+            new_guess = [np.array(halo_to_particles[h]) if h in halo_to_particles else np.array([]) for h in self.sub_list]
+
+            switched = 0
+            atol = min(atol, self.shared + 1)
+            total_old = self.shared
+            for old, new in zip(prelim_guess, new_guess):                
+                switched += len( set(old).symmetric_difference(set(new)))
             
-        return halo_to_particles
-        
-
-
-
-
-
-
-
-
-
-
-
-
-
+            print(f"-{it}-th iteration (shared={total_old}): {switched}/{total_old} changed ({switched/total_old:.2e})")
+            if total_old and ((switched / total_old) <= rtol or switched <= atol):
+                print(f"Converged on iteration {it}!")
+                break
+            else:
+                prelim_guess = new_guess
+            
+        return halo_to_particles        
+       
 
 
 
